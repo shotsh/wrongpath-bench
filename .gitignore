@@ -1,0 +1,12 @@
+# build artifacts
+*.o
+*.out
+*.exe
+a.out
+
+# editor
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
