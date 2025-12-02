@@ -1,16 +1,22 @@
-# Makefile
 CC     = gcc
-CFLAGS = -O2 -Wall -Wextra
+CFLAGS = -O3 -Wall -Wextra -std=c11
 
-.PHONY: all clean
+SRC = benchmark.c
 
-all: benchmark benchmark_trace
+# デフォルト: 両方ビルド
+all: benchmark_dense benchmark_stride
 
-benchmark: benchmark.c
-	$(CC) $(CFLAGS) benchmark.c -o benchmark
+# 密アクセス版 (ACCESS_MODE=0)
+benchmark_dense: $(SRC)
+	$(CC) $(CFLAGS) -DACCESS_MODE=0 -o $@ $<
 
-benchmark_trace: benchmark.c
-	$(CC) $(CFLAGS) -DTRACE_MODE benchmark.c -o benchmark_trace
+# ストライド版 (ACCESS_MODE=1)
+# STRIDE は要素数単位のストライド長として上書き可能:
+#   make benchmark_stride STRIDE=16
+STRIDE ?= 8
+
+benchmark_stride: $(SRC)
+	$(CC) $(CFLAGS) -DACCESS_MODE=1 -DSTRIDE_ELEMS=$(STRIDE) -o $@ $<
 
 clean:
-	rm -f benchmark benchmark_trace
+	rm -f benchmark_dense benchmark_stride
