@@ -35,7 +35,7 @@ def main():
         perf_cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        text=True,
+        universal_newlines=True,  # こっちに変更
     )
 
     # 元の出力も一応表示
