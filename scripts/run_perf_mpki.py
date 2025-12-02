@@ -1,126 +1,143 @@
 #!/usr/bin/env python3
-import argparse
 import subprocess
 import sys
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Run perf stat and compute L1/L2/DRAM MPKI."
-    )
-    # 以降の引数はそのまま実行コマンドとして渡す
-    parser.add_argument(
-        "cmd",
-        nargs=argparse.REMAINDER,
-        help="command to run, e.g. ./benchmark 32768 536870912 524288 0",
-    )
-    args = parser.parse_args()
 
-    if not args.cmd:
-        parser.error("you must specify the command to run, e.g. ./benchmark ...")
+EVENTS = [
+    "instructions",
+    "L1-dcache-loads",
+    "L1-dcache-load-misses",
+    "l2_cache_accesses_from_dc_misses",
+    "l2_cache_misses_from_dc_misses",
+    "ls_refills_from_sys.ls_mabresp_lcl_dram",
+    "ls_refills_from_sys.ls_mabresp_rmt_dram",
+]
 
+
+def run_perf(cmd):
     perf_cmd = [
-        "perf", "stat", "-x,",           # CSV 風フォーマット
-        "-e", "instructions",
-        "-e", "L1-dcache-loads",
-        "-e", "L1-dcache-load-misses",
-        "-e", "l2_cache_accesses_from_dc_misses",
-        "-e", "l2_cache_misses_from_dc_misses",
-        "-e", "ls_refills_from_sys.ls_mabresp_lcl_dram",
-        "-e", "ls_refills_from_sys.ls_mabresp_rmt_dram",
-        "--",
-    ] + args.cmd
+        "perf", "stat",
+        "-x,",  # CSV っぽい区切り
+    ]
+    for ev in EVENTS:
+        perf_cmd += ["-e", ev]
+    perf_cmd.append("--")
+    perf_cmd += cmd
 
-    # perf の stderr にカウンタが出るのでそれをキャプチャ
+    # Python 3.6 用: text= ではなく universal_newlines=
     proc = subprocess.run(
         perf_cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        universal_newlines=True,  # こっちに変更
+        universal_newlines=True,
     )
 
-    # 元の出力も一応表示
-    print("=== perf raw output (stderr) ===")
-    print(proc.stderr)
+    return proc.returncode, proc.stdout, proc.stderr
 
-    if proc.returncode != 0 and "Performance counter stats" not in proc.stderr:
-        print(f"perf failed with code {proc.returncode}", file=sys.stderr)
-        sys.exit(proc.returncode)
 
-    # perf stat -x, の 1 行はだいたい:
-    # <value>,<unit>,<event>,<run_count>,<metric>
-    values = {}
+def parse_perf_csv(stderr_text):
+    """
+    perf stat -x, の stderr から
+    { イベント名(正規化) -> 値(int) } の dict を作る
+    """
+    counters = {}
 
-    for line in proc.stderr.splitlines():
-        parts = [p.strip() for p in line.split(",")]
+    for line in stderr_text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        # perf のメッセージ行はスキップ
+        if not any(ch.isdigit() for ch in line.split(",")[0]):
+            # 先頭フィールドが数値っぽくないものは捨てる
+            continue
+
+        parts = line.split(",")
         if len(parts) < 3:
             continue
-        val_str, _, name = parts[:3]
-        if not name:
-            continue
-        values[name] = val_str
 
-    def get_val(name: str) -> int:
-        v = values.get(name)
-        if v is None:
-            return 0
-        # "<not supported>" とか "<not counted>" は 0 扱い
-        if v.startswith("<"):
-            return 0
+        value_str = parts[0].strip()
+        event_raw = parts[2].strip()
+
         try:
-            return int(v)
+            value = int(value_str)
         except ValueError:
-            return 0
+            # <not counted> など
+            continue
 
-    instr      = get_val("instructions")
-    l1_loads   = get_val("L1-dcache-loads")
-    l1_miss    = get_val("L1-dcache-load-misses")
-    l2_acc     = get_val("l2_cache_accesses_from_dc_misses")
-    l2_miss    = get_val("l2_cache_misses_from_dc_misses")
-    dram_loc   = get_val("ls_refills_from_sys.ls_mabresp_lcl_dram")
-    dram_rmt   = get_val("ls_refills_from_sys.ls_mabresp_rmt_dram")
-    dram_total = dram_loc + dram_rmt
+        # "instructions:u" → "instructions" に正規化
+        event_name = event_raw.split(":", 1)[0]
+
+        counters[event_name] = value
+
+    return counters
+
+
+def print_summary(counters):
+    def get(name):
+        return counters.get(name, 0)
+
+    instr = get("instructions")
+    l1_loads = get("L1-dcache-loads")
+    l1_miss = get("L1-dcache-load-misses")
+    l2_acc = get("l2_cache_accesses_from_dc_misses")
+    l2_miss = get("l2_cache_misses_from_dc_misses")
+    dram_local = get("ls_refills_from_sys.ls_mabresp_lcl_dram")
+    dram_remote = get("ls_refills_from_sys.ls_mabresp_rmt_dram")
+    dram_total = dram_local + dram_remote
 
     if instr == 0:
-        print("instructions is 0, cannot compute MPKI", file=sys.stderr)
+        print("instructions is 0, cannot compute MPKI")
+        return
+
+    kinst = instr / 1000.0
+
+    l1_mpki = l1_miss / kinst
+    l2_mpki = l2_miss / kinst
+    dram_mpki = dram_total / kinst
+
+    l1_miss_rate = (l1_miss / float(l1_loads)) * 100.0 if l1_loads > 0 else 0.0
+    l2_miss_rate = (l2_miss / float(l2_acc)) * 100.0 if l2_acc > 0 else 0.0
+
+    print("=== Parsed counters ===")
+    print("instructions            :", instr)
+    print("L1-dcache-loads         :", l1_loads)
+    print("L1-dcache-load-misses   :", l1_miss)
+    print("l2_cache_accesses_from_dc_misses :", l2_acc)
+    print("l2_cache_misses_from_dc_misses   :", l2_miss)
+    print("DRAM fills (local+remote):", dram_total,
+          "(local={}, remote={})".format(dram_local, dram_remote))
+    print()
+
+    print("=== Rates ===")
+    print("L1 miss rate           : {:.2f} %".format(l1_miss_rate))
+    print("L2 miss rate (on L1D misses): {:.2f} %".format(l2_miss_rate))
+    print()
+
+    print("=== MPKI (per 1K instructions) ===")
+    print("L1 MPKI                : {:.3f}".format(l1_mpki))
+    print("L2 MPKI                : {:.3f}".format(l2_mpki))
+    print("DRAM MPKI (local+remote): {:.3f}".format(dram_mpki))
+
+
+def main():
+    if len(sys.argv) < 2:
+        print("Usage: {} <binary> [args ...]".format(sys.argv[0]))
         sys.exit(1)
 
-    # MPKI 計算
-    l1_mpki   = l1_miss   * 1000.0 / instr
-    l2_mpki   = l2_miss   * 1000.0 / instr
-    dram_mpki = dram_total * 1000.0 / instr
+    cmd = sys.argv[1:]
 
-    # miss rate も一緒に計算
-    if l1_loads > 0:
-        l1_miss_rate = 100.0 * l1_miss / l1_loads
-    else:
-        l1_miss_rate = None
+    rc, out, err = run_perf(cmd)
 
-    if l2_acc > 0:
-        l2_miss_rate = 100.0 * l2_miss / l2_acc
-    else:
-        l2_miss_rate = None
+    print("=== perf raw output (stderr) ===")
+    print(err.strip())
+    print()
 
-    print()
-    print("=== Derived metrics (per 1K instructions) ===")
-    print(f"instructions               : {instr}")
-    print()
-    print(f"L1D misses   = {l1_miss}  (loads = {l1_loads})")
-    print(f"  -> L1D MPKI  = {l1_mpki:.3f}")
-    if l1_miss_rate is not None:
-        print(f"  -> L1D miss% = {l1_miss_rate:.2f} %")
-    else:
-        print("  -> L1D miss% = N/A")
-    print()
-    print(f"L2 misses(from L1D misses) = {l2_miss}  (accesses = {l2_acc})")
-    print(f"  -> L2 MPKI                = {l2_mpki:.3f}")
-    if l2_miss_rate is not None:
-        print(f"  -> L2 miss%               = {l2_miss_rate:.2f} %")
-    else:
-        print("  -> L2 miss%               = N/A")
-    print()
-    print(f"DRAM refills (local+remote) = {dram_total}  "
-          f"(local={dram_loc}, remote={dram_rmt})")
-    print(f"  -> DRAM MPKI              = {dram_mpki:.3f}")
+    counters = parse_perf_csv(err)
+    print_summary(counters)
+
+    # perf の終了コードはそのまま返しておく
+    sys.exit(rc)
+
 
 if __name__ == "__main__":
     main()

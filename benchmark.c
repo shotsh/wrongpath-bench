@@ -19,7 +19,7 @@ static double run_kernel(double *A, double *C,
                          size_t A_elems,
                          size_t logical_B_elems,  // stride=1 のときに相当する「論理 B サイズ」
                          size_t chunk_elems,
-                         size_t stride_elems)     // dense:1, stride:8 など
+                         size_t stride_elems)     // dense:1, stride:8 など（実効ストライド）
 {
     // 「論理 B」を chunk に分割したときの外側ループ回数
     size_t outer_iters = logical_B_elems / chunk_elems;
@@ -48,14 +48,23 @@ static double run_kernel(double *A, double *C,
     return sum;
 }
 
+static void usage(const char *prog)
+{
+    fprintf(stderr,
+        "Usage: %s A_bytes B_bytes chunk_bytes [access_mode] [stride_elems]\n"
+        "  A_bytes      : size of array A in bytes (e.g. 32768)\n"
+        "  B_bytes      : logical B size in bytes (e.g. 536870912)\n"
+        "  chunk_bytes  : chunk size in bytes (must divide B_bytes)\n"
+        "  access_mode  : 0=dense, 1=strided (default=0)\n"
+        "  stride_elems : base stride (used for allocation and strided mode,\n"
+        "                 default=8; dense mode still uses stride=1 in kernel)\n",
+        prog);
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 4) {
-        fprintf(stderr,
-            "Usage: %s A_bytes B_bytes chunk_bytes [access_mode] [stride_elems]\n"
-            "  access_mode: 0=dense, 1=strided (default=0)\n"
-            "  stride_elems: used only when access_mode=1 (default=8)\n",
-            argv[0]);
+        usage(argv[0]);
         return 1;
     }
 
@@ -63,8 +72,8 @@ int main(int argc, char **argv)
     size_t B_bytes     = strtoull(argv[2], NULL, 0);  // 「論理 B サイズ」
     size_t chunk_bytes = strtoull(argv[3], NULL, 0);
 
-    int access_mode = 0;
-    size_t user_stride = 8;   // デフォルトのストライド
+    int access_mode = 0;      // 0=dense, 1=strided
+    size_t user_stride = 8;   // 「基準ストライド」: C のサイズ計算に使う
 
     if (argc >= 5) {
         access_mode = atoi(argv[4]);  // 0 or 1
@@ -77,8 +86,10 @@ int main(int argc, char **argv)
         }
     }
 
-    // dense のときは stride=1 として扱う（ここで分岐しておけば、カーネル内には分岐が出ない）
-    size_t stride_elems = (access_mode == 0) ? 1 : user_stride;
+    if (access_mode != 0 && access_mode != 1) {
+        fprintf(stderr, "access_mode must be 0 (dense) or 1 (strided)\n");
+        return 1;
+    }
 
     size_t A_elems          = A_bytes     / sizeof(double);
     size_t logical_B_elems  = B_bytes     / sizeof(double);
@@ -93,21 +104,36 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    // stride_elems に応じて C の実メモリサイズを広げる
-    //  dense:  stride=1 → C_elems = logical_B_elems (B 相当)
-    //  stride: stride=8 → C_elems = logical_B_elems * 8 （より大きいワーキングセット）
-    size_t C_elems = logical_B_elems * stride_elems;
+    // ★ C のサイズは「常に user_stride 基準」で決める（mode に依存しない）
+    //
+    //  dense(run: access_mode=0):
+    //    - カーネル内の実効ストライド stride_elems = 1
+    //    - C_elems = logical_B_elems * user_stride だけ確保＆初期化するが、
+    //      実際にアクセスするのは先頭 logical_B_elems 要素だけ
+    //
+    //  strided(run: access_mode=1):
+    //    - カーネル内の実効ストライド stride_elems = user_stride
+    //    - idx の最大値は logical_B_elems*user_stride - 1 なので
+    //      ちょうど C の全体を使い切る
+    //
+    //  → access_mode=0/1 どちらでも C_elems は同じになる
+    //
+    size_t C_elems = logical_B_elems * user_stride;
+
+    // カーネル内で使う実効ストライド
+    size_t stride_elems = (access_mode == 0) ? 1 : user_stride;
 
     printf("# Params:\n");
-    printf("#   A_bytes     = %zu\n", A_bytes);
-    printf("#   B_bytes     = %zu  (logical)\n", B_bytes);
-    printf("#   chunk_bytes = %zu\n", chunk_bytes);
-    printf("#   A_elems     = %zu\n", A_elems);
-    printf("#   B_elems     = %zu  (logical)\n", logical_B_elems);
-    printf("#   C_elems     = %zu  (allocated)\n", C_elems);
-    printf("#   chunk_elems = %zu\n", chunk_elems);
-    printf("#   access_mode = %d (0=dense,1=strided)\n", access_mode);
-    printf("#   stride_elems= %zu (effective)\n", stride_elems);
+    printf("#   A_bytes      = %zu\n", A_bytes);
+    printf("#   B_bytes      = %zu  (logical)\n", B_bytes);
+    printf("#   chunk_bytes  = %zu\n", chunk_bytes);
+    printf("#   A_elems      = %zu\n", A_elems);
+    printf("#   B_elems      = %zu  (logical)\n", logical_B_elems);
+    printf("#   C_elems      = %zu  (allocated, same for dense/strided)\n", C_elems);
+    printf("#   chunk_elems  = %zu\n", chunk_elems);
+    printf("#   access_mode  = %d (0=dense,1=strided)\n", access_mode);
+    printf("#   user_stride  = %zu (for allocation)\n", user_stride);
+    printf("#   stride_elems = %zu (effective in kernel)\n", stride_elems);
 
     double *A = (double *)malloc(sizeof(double) * A_elems);
     double *C = (double *)malloc(sizeof(double) * C_elems);
