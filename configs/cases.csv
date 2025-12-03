@@ -1,0 +1,5 @@
+case_id,desc,A_KiB,B_MiB,chunk_KiB,B_stride_elems,outer_scale,kernel_reps
+stride_1,baseline small stride,32,64,512,1,1,500
+stride_8,B stride 8,32,64,512,8,1,500
+stride_16,B stride 16,32,64,512,16,1,500
+stride_32,B stride 32,32,64,512,32,1,500
