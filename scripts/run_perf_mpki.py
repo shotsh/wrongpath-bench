@@ -13,6 +13,7 @@ import subprocess
 #   - イベント名は perf list で存在すること
 
 EVENTS = [
+    "cycles",
     "instructions",
     "L1-dcache-loads",
     "L1-dcache-load-misses",
@@ -21,6 +22,7 @@ EVENTS = [
     "ls_refills_from_sys.ls_mabresp_lcl_dram",
     "ls_refills_from_sys.ls_mabresp_rmt_dram",
 ]
+
 
 def run_perf(binary, args):
     cmd = [
@@ -63,7 +65,7 @@ def parse_perf_stderr(stderr_text):
         value_str = parts[0].strip()
         event_raw = parts[2].strip()
 
-        # "<not counted>" の行などはスキップ
+        # "<not counted>" や "<not supported>" の行などはスキップ
         if value_str in ("<not counted>", "<not supported>"):
             continue
 
@@ -104,6 +106,7 @@ def main():
 
     counters = parse_perf_stderr(result.stderr)
 
+    cycles = counters.get("cycles", 0)
     instr = counters.get("instructions", 0)
     l1_loads = counters.get("L1-dcache-loads", 0)
     l1_miss  = counters.get("L1-dcache-load-misses", 0)
@@ -115,28 +118,35 @@ def main():
 
     print()
     print("=== Parsed counters ===")
-    print("instructions            : {}".format(instr))
-    print("L1-dcache-loads         : {}".format(l1_loads))
-    print("L1-dcache-load-misses   : {}".format(l1_miss))
+    print("cycles                 : {}".format(cycles))
+    print("instructions           : {}".format(instr))
+    print("L1-dcache-loads        : {}".format(l1_loads))
+    print("L1-dcache-load-misses  : {}".format(l1_miss))
     print("l2_cache_accesses_from_dc_misses : {}".format(l2_access_from_l1d_miss))
     print("l2_cache_misses_from_dc_misses   : {}".format(l2_miss))
     print("DRAM fills (local+remote): {} (local={}, remote={})"
           .format(dram_total, dram_local, dram_remote))
 
-    # レート計算
+    # レート / IPC 計算
     print()
-    print("=== Rates ===")
+    print("=== Rates / IPC ===")
     if l1_loads > 0:
         l1_miss_rate = 100.0 * l1_miss / l1_loads
-        print("L1 miss rate            : {:.2f} %".format(l1_miss_rate))
+        print("L1 miss rate           : {:.2f} %".format(l1_miss_rate))
     else:
-        print("L1 miss rate            : N/A (L1-dcache-loads == 0)")
+        print("L1 miss rate           : N/A (L1-dcache-loads == 0)")
 
     if l2_access_from_l1d_miss > 0:
         l2_miss_rate = 100.0 * l2_miss / l2_access_from_l1d_miss
         print("L2 miss rate (on L1D misses): {:.2f} %".format(l2_miss_rate))
     else:
         print("L2 miss rate (on L1D misses): N/A (L2 accesses from L1D misses == 0)")
+
+    if cycles > 0:
+        ipc = float(instr) / float(cycles)
+        print("IPC                    : {:.3f}".format(ipc))
+    else:
+        print("IPC                    : N/A (cycles == 0)")
 
     # MPKI / PKI 計算
     print()
@@ -151,8 +161,8 @@ def main():
     l2_mpki = l2_miss / k
     dram_pki = dram_total / k   # 「ミス」ではなく DRAM フィルなので PKI と表現
 
-    print("L1 MPKI                 : {:.3f}".format(l1_mpki))
-    print("L2 MPKI                 : {:.3f}".format(l2_mpki))
+    print("L1 MPKI                : {:.3f}".format(l1_mpki))
+    print("L2 MPKI                : {:.3f}".format(l2_mpki))
     print("DRAM fill PKI (local+remote): {:.3f}".format(dram_pki))
 
 
