@@ -2,17 +2,21 @@
 import sys
 import subprocess
 
-# このスクリプトの使い方:
-#   ./scripts/run_perf_mpki.py <binary> [binary args...]
+# 使い方:
+#   デフォルト (n05-demeter 想定; EPYC + ls_refills_from_sys.*):
+#       ./scripts/run_perf_mpki.py ./benchmark 32768 536870912 524288 1 16
 #
-# 例:
-#   ./scripts/run_perf_mpki.py ./benchmark 32768 536870912 524288 1 8
+#   n07-artemis 想定 (ls_dmnd_fills_from_sys.mem_io_local を使う):
+#       ./scripts/run_perf_mpki.py --node artemis ./benchmark 32768 536870912 524288 1 16
 #
-# 前提:
-#   - perf がインストール済み
-#   - イベント名は perf list で存在すること
+#   共通:
+#       <binary> 以下の引数はそのまま実行ファイルに渡される
+#
+# 事前条件:
+#   - perf がインストールされていること
+#   - それぞれのノードで perf list に対応イベントが存在すること
 
-EVENTS = [
+EVENTS_DEMETER = [
     "cycles",
     "instructions",
     "L1-dcache-loads",
@@ -23,14 +27,61 @@ EVENTS = [
     "ls_refills_from_sys.ls_mabresp_rmt_dram",
 ]
 
+EVENTS_ARTEMIS = [
+    "cycles",
+    "instructions",
+    "L1-dcache-loads",
+    "L1-dcache-load-misses",
+    "l2_cache_accesses_from_dc_misses",
+    "l2_cache_misses_from_dc_misses",
+    "ls_dmnd_fills_from_sys.mem_io_local",
+    # remote 相当のイベントは無い前提なので 0 扱いにする
+]
 
-def run_perf(binary, args):
+def parse_cli_args(argv):
+    """
+    argv から node モードと binary / args を切り出す。
+    形式:
+        run_perf_mpki.py [--node demeter|artemis] <binary> [binary-args...]
+    """
+    node = "demeter"  # デフォルト
+    i = 1
+    n = len(argv)
+
+    # オプションを先頭からパース
+    while i < n and argv[i].startswith("--"):
+        if argv[i] == "--node":
+            if i + 1 >= n:
+                print("Error: --node requires an argument (demeter|artemis)", file=sys.stderr)
+                sys.exit(1)
+            node = argv[i + 1].lower()
+            i += 2
+        else:
+            print("Error: unknown option {}".format(argv[i]), file=sys.stderr)
+            sys.exit(1)
+
+    if i >= n:
+        print("Usage: {} [--node demeter|artemis] <binary> [binary args ...]".format(argv[0]),
+              file=sys.stderr)
+        sys.exit(1)
+
+    binary = argv[i]
+    args = argv[i + 1:]
+
+    if node not in ("demeter", "artemis"):
+        print("Error: --node must be 'demeter' or 'artemis'", file=sys.stderr)
+        sys.exit(1)
+
+    return node, binary, args
+
+
+def run_perf(binary, args, events):
     cmd = [
         "perf", "stat",
         "-x", ",",          # CSV 形式
         "--no-big-num",     # 桁区切りなし
     ]
-    for ev in EVENTS:
+    for ev in events:
         cmd += ["-e", ev]
     cmd.append(binary)
     cmd += args
@@ -45,12 +96,14 @@ def run_perf(binary, args):
     return result
 
 
-def parse_perf_stderr(stderr_text):
+def parse_perf_stderr(stderr_text, events_of_interest):
     """
     perf stat -x, の stderr をパースして、
     {イベント名: 値(int)} の dict を返す。
     """
     counters = {}
+
+    interest_set = set(events_of_interest)
 
     for line in stderr_text.splitlines():
         line = line.strip()
@@ -69,7 +122,6 @@ def parse_perf_stderr(stderr_text):
         if value_str in ("<not counted>", "<not supported>"):
             continue
 
-        # 値パース
         try:
             value = int(value_str)
         except ValueError:
@@ -78,8 +130,7 @@ def parse_perf_stderr(stderr_text):
         # event_raw には "instructions:u" のように :u が付くので落とす
         event_name = event_raw.split(":")[0]
 
-        # 我々が指定した名前だけを拾う
-        if event_name in EVENTS:
+        if event_name in interest_set:
             counters[event_name] = value
 
     return counters
@@ -87,14 +138,18 @@ def parse_perf_stderr(stderr_text):
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: {} <binary> [binary args ...]".format(sys.argv[0]),
-              file=sys.stderr)
+        print("Usage: {} [--node demeter|artemis] <binary> [binary args ...]"
+              .format(sys.argv[0]), file=sys.stderr)
         sys.exit(1)
 
-    binary = sys.argv[1]
-    args = sys.argv[2:]
+    node, binary, args = parse_cli_args(sys.argv)
 
-    result = run_perf(binary, args)
+    if node == "demeter":
+        events = EVENTS_DEMETER
+    else:  # "artemis"
+        events = EVENTS_ARTEMIS
+
+    result = run_perf(binary, args, events)
 
     # 生の stderr (perf の CSV 出力) をそのまま表示
     print("=== perf raw output (stderr) ===")
@@ -104,30 +159,42 @@ def main():
     else:
         print("(no stderr output)")
 
-    counters = parse_perf_stderr(result.stderr)
+    counters = parse_perf_stderr(result.stderr, events)
 
+    # 共通イベント
     cycles = counters.get("cycles", 0)
-    instr = counters.get("instructions", 0)
+    instr  = counters.get("instructions", 0)
     l1_loads = counters.get("L1-dcache-loads", 0)
     l1_miss  = counters.get("L1-dcache-load-misses", 0)
     l2_access_from_l1d_miss = counters.get("l2_cache_accesses_from_dc_misses", 0)
     l2_miss  = counters.get("l2_cache_misses_from_dc_misses", 0)
-    dram_local  = counters.get("ls_refills_from_sys.ls_mabresp_lcl_dram", 0)
-    dram_remote = counters.get("ls_refills_from_sys.ls_mabresp_rmt_dram", 0)
-    dram_total  = dram_local + dram_remote
+
+    # DRAM 関係
+    if node == "demeter":
+        dram_local  = counters.get("ls_refills_from_sys.ls_mabresp_lcl_dram", 0)
+        dram_remote = counters.get("ls_refills_from_sys.ls_mabresp_rmt_dram", 0)
+    else:  # artemis: local のみ
+        dram_local  = counters.get("ls_dmnd_fills_from_sys.mem_io_local", 0)
+        dram_remote = 0
+
+    dram_total = dram_local + dram_remote
 
     print()
     print("=== Parsed counters ===")
+    print("node                    : {}".format(node))
     print("cycles                 : {}".format(cycles))
     print("instructions           : {}".format(instr))
     print("L1-dcache-loads        : {}".format(l1_loads))
     print("L1-dcache-load-misses  : {}".format(l1_miss))
     print("l2_cache_accesses_from_dc_misses : {}".format(l2_access_from_l1d_miss))
     print("l2_cache_misses_from_dc_misses   : {}".format(l2_miss))
-    print("DRAM fills (local+remote): {} (local={}, remote={})"
-          .format(dram_total, dram_local, dram_remote))
+    if node == "demeter":
+        print("DRAM fills (local+remote): {} (local={}, remote={})"
+              .format(dram_total, dram_local, dram_remote))
+    else:
+        print("DRAM fills (local+remote): {} (local={}, remote assumed=0)"
+              .format(dram_total, dram_local))
 
-    # レート / IPC 計算
     print()
     print("=== Rates / IPC ===")
     if l1_loads > 0:
@@ -148,7 +215,6 @@ def main():
     else:
         print("IPC                    : N/A (cycles == 0)")
 
-    # MPKI / PKI 計算
     print()
     print("=== Per-1K-instruction metrics (MPKI/PKI) ===")
     if instr == 0:
@@ -157,9 +223,9 @@ def main():
 
     k = instr / 1000.0
 
-    l1_mpki = l1_miss / k
-    l2_mpki = l2_miss / k
-    dram_pki = dram_total / k   # 「ミス」ではなく DRAM フィルなので PKI と表現
+    l1_mpki   = l1_miss / k
+    l2_mpki   = l2_miss / k
+    dram_pki  = dram_total / k   # 「ミス」ではなく DRAM フィルなので PKI と表現
 
     print("L1 MPKI                : {:.3f}".format(l1_mpki))
     print("L2 MPKI                : {:.3f}".format(l2_mpki))

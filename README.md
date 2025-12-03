@@ -1,395 +1,334 @@
-
 # wrongpath-bench
 
-A tiny, parameterized memory microbenchmark plus a `perf` wrapper script.
+ループ本体と「でかい配列アクセス」を使って、キャッシュ階層と DRAM へのデマンドアクセスを制御しやすい形で観測するための小さなマイクロベンチマークです。
 
-The goal is to emulate the “large tail B after a loop A” pattern and measure
-how often we actually go out to DRAM, in preparation for wrong-path prefetch
-experiments.
+目的は主に:
 
-- Array **A**: small-ish array that we scan every outer iteration to blow out L1.
-- Array **C**: backing store for a logical “B array” that is big enough to
-  exceed L2 / LLC and cause DRAM traffic.
-- Two access patterns for the tail:
-  - **dense**: sequential access inside each chunk
-  - **strided**: fixed-element stride inside each chunk, with a larger
-    effective working set
+* **L1/L2/DRAM のミス頻度 (MPKI/PKI)** をざっくり把握する
+* **アクセスパターン (dense / strided)** を切り替えて、
 
-`perf` is used to measure L1 / L2 behavior and DRAM demand fills and to report
-per-1K-instruction metrics (MPKI / PKI).
+  * DRAM まで到達するデマンドアクセス
+  * L1/L2 ヒット率
+    がどう変わるかを見る
+* 将来的に **wrong-path prefetch / loop-tail 実験用のトレース生成** の元ネタにする
 
-Tested mainly on AMD server CPUs (e.g., TAMU clusters); the event names are
-AMD-specific and may need adjustment on other platforms.
+`perf stat` をラップする Python スクリプトで、MPKI や DRAM fill PKI を自動計算できます。
 
 ---
 
-## Files
+## ファイル構成
 
-- `benchmark.c`  
-  C microbenchmark that implements the A + B pattern and exposes several
-  knobs:
-  - size of A
-  - logical size of B
-  - chunk size
-  - dense vs strided access
-  - stride length
-  - optional outer repetition count for the kernel body
-
-- `scripts/run_perf_mpki.py`  
-  Helper script that runs `perf stat` on `benchmark` and parses:
-  - L1 D-cache miss rate and MPKI
-  - L2 miss rate and MPKI (on L1D misses)
-  - DRAM demand-fill PKI (fills per kilo-instruction)
+* `benchmark.c`
+  L1 を吹き飛ばす小さい配列 `A` と、大きな配列 `B` に対するアクセスループ本体。
+* `scripts/run_perf_mpki.py`
+  `perf stat` を呼び出し、L1/L2 miss rate, MPKI, DRAM fill PKI, IPC を計算して表示するラッパ。
 
 ---
 
-## Build
+## ビルド方法
 
-Simple build:
+普通に `gcc` で OK です。
 
 ```bash
 gcc -O3 -march=native -Wall -o benchmark benchmark.c
-````
-
-You can of course substitute `clang` or adjust flags as needed.
-
-Requirements:
-
-* A recent `gcc` or `clang`
-* Linux `perf` installed and usable
-* Sufficient permissions to use hardware performance counters
-  (e.g. `perf_event_paranoid` not too strict)
+```
 
 ---
 
-## Benchmark design
+## ベンチマークの挙動
 
-### High-level picture
+### コマンドライン引数
 
-* **A array**
-
-  * Size = `A_bytes`
-  * Access pattern: linear scan `A[0 .. A_elems-1]` every outer iteration
-  * Role: blow out L1 so that the following B/C accesses are not trivially
-    hitting in L1
-
-* **Logical B**
-
-  * Logical size = `B_bytes`
-  * Determines how many “chunks” we have:
-
-    * `logical_B_elems = B_bytes / sizeof(double)`
-    * `chunk_elems     = chunk_bytes / sizeof(double)`
-    * `outer_iters     = logical_B_elems / chunk_elems`
-  * We conceptually think of B as `outer_iters` chunks, each of `chunk_bytes`.
-
-* **Physical C**
-
-  * Actually allocated array; backing store for logical B
-  * Size:
-
-    * `C_elems = logical_B_elems * user_stride`
-  * This is large enough so that strided mode can spread accesses out more
-    aggressively than dense mode, while keeping the loop structure the same.
-
-### Access pattern
-
-The kernel is:
-
-```c
-static double run_kernel(double *A, double *C,
-                         size_t A_elems,
-                         size_t logical_B_elems,
-                         size_t chunk_elems,
-                         size_t stride_elems,
-                         size_t kernel_reps)
-{
-    size_t outer_iters = logical_B_elems / chunk_elems;
-    double sum = 0.0;
-
-    for (size_t rep = 0; rep < kernel_reps; rep++) {
-        for (size_t outer = 0; outer < outer_iters; outer++) {
-            // 1) Sweep A to thrash L1
-            for (size_t i = 0; i < A_elems; i++) {
-                sum += A[i];
-            }
-
-            // 2) Access one chunk of logical B via C
-            size_t base = outer * chunk_elems * stride_elems;
-
-            for (size_t j = 0; j < chunk_elems; j++) {
-                size_t idx = base + j * stride_elems;
-                sum += C[idx];
-            }
-        }
-    }
-
-    return sum;
-}
+```bash
+./benchmark A_bytes B_bytes chunk_bytes [access_mode] [stride_elems] [outer_scale]
 ```
-
-* In **dense mode**:
-
-  * `stride_elems = 1`
-  * C is still allocated at `logical_B_elems * user_stride`, but we only use a
-    contiguous subset that corresponds to dense B.
-
-* In **strided mode**:
-
-  * `stride_elems = user_stride` (e.g., 8, 16, 32)
-  * For each logical chunk, we walk C with that stride, so the effective
-    working set per chunk is `chunk_elems * stride_elems * sizeof(double)`.
-  * Because we keep `outer_iters` and `chunk_elems` the same, the dynamic loop
-    structure (and thus instruction count) is roughly comparable between dense
-    and strided runs.
-
----
-
-## Command-line interface
-
-The `benchmark` binary has the following usage:
-
-```text
-./benchmark A_bytes B_bytes chunk_bytes [access_mode] [user_stride] [kernel_reps]
-
-  A_bytes      : Size of array A in bytes.
-  B_bytes      : Logical "B" size in bytes.
-  chunk_bytes  : Size of each chunk of B in bytes.
-  access_mode  : 0 = dense, 1 = strided (default: 0).
-  user_stride  : Stride in elements used for allocation and strided mode
-                 (default: 8).
-  kernel_reps  : Number of times to repeat the whole kernel body
-                 (default: 1).
-```
-
-Details:
 
 * `A_bytes`
 
-  * Choose something around / above the L1D size.
-  * In many of the examples we use `A_bytes = 32 * 1024`.
-
+  * 小さい配列 `A` のバイト数
+  * 毎イテレーションで **全要素を走査**して L1 を吹き飛ばす役
 * `B_bytes`
 
-  * Logical size of B.
-  * In our experiments we often use `B_bytes = 512 * 1024 * 1024` (512 MiB) to
-    ensure we go well beyond LLC and get DRAM traffic.
-
+  * 論理的な `B` のサイズ (バイト)
+  * これを `chunk_bytes` で割って **外側ループ回数**を決める
 * `chunk_bytes`
 
-  * Logical per-iteration footprint from B.
-  * We commonly use `chunk_bytes = 512 * 1024`.
+  * B を「チャンク」に刻むサイズ (バイト)
+  * `B_bytes` は `chunk_bytes` の倍数である必要がある
+* `access_mode` (オプション, デフォルト 0)
 
-* `access_mode`
+  * `0` = dense アクセス (連続アクセス)
+  * `1` = strided アクセス
+* `stride_elems` (オプション, デフォルト 8)
 
-  * `0` (dense): `stride_elems` is forced to 1 internally.
-  * `1` (strided): `stride_elems = user_stride`.
+  * `access_mode=1` のときのストライド (double 要素単位)
+  * `access_mode=0` のときも **配列 B の確保サイズ**には効く (後述)
+* `outer_scale` (オプション, デフォルト 1)
 
-* `user_stride`
+  * ループ全体を何周分まわすか
+  * **実効 outer ループ回数をスケールするノブ**
 
-  * Used in two places:
+### 配列サイズとループ回数
 
-    * `C_elems = logical_B_elems * user_stride`
-      → actual backing array size
-    * `stride_elems` when `access_mode=1`.
-  * This way dense and strided runs allocate the same C size, and differ only
-    in how they walk it.
+コード上の主なパラメータは:
 
-* `kernel_reps`
+* `A_elems = A_bytes / sizeof(double)`
+* `B_elems = B_bytes / sizeof(double)`  …論理的な B の要素数
+* `chunk_elems = chunk_bytes / sizeof(double)`
 
-  * Wraps the whole kernel in an outer repetition loop.
-  * Useful when you want to make the kernel region “heavy” enough that
-    initialization overhead is negligible in `perf` output.
-  * If you only care about the steady-state kernel, you can bump this to 10,
-    100, etc., and look mainly at MPKI/PKI.
+制約:
+
+* `A_elems > 0`
+* `B_elems > 0`
+* `chunk_elems > 0`
+* `B_elems % chunk_elems == 0`
+
+論理的な B をチャンクに分割したとき:
+
+```text
+base_outer_iters = B_elems / chunk_elems
+```
+
+* `outer_scale` で全体を増やして
+
+```text
+outer_iters = base_outer_iters * outer_scale
+```
+
+* 実際のカーネル内ループは:
+
+```c
+for (outer = 0; outer < outer_iters; outer++) {
+    // A 全体をなめて L1 を吹き飛ばす
+    for (i = 0; i < A_elems; i++) { ... }
+
+    size_t base = outer * chunk_elems * stride_elems;
+
+    // chunk_elems 回だけ必ずループ
+    for (j = 0; j < chunk_elems; j++) {
+        size_t idx = base + j * stride_elems;
+        sum += B[idx];
+    }
+}
+```
+
+### dense / strided の切り替え
+
+* `access_mode == 0` (dense)
+
+  * `stride_elems` は **実効的には 1** に固定される
+  * ただし `user_stride` は B の確保サイズにだけ効く
+* `access_mode == 1` (strided)
+
+  * `stride_elems = user_stride` がそのまま使われる
+
+まとめると:
+
+* 論理 B サイズ (`B_bytes`) と `chunk_bytes` から **outer/inner のループ回数**を決定
+* `stride_elems` の値だけを変えても、
+
+  * outer/inner のループ回数は同じ
+  * **実行命令数はほぼ同じ**
+  * ただしアクセスパターンとワーキングセットが変わる
+
+### B の確保サイズ
+
+実際に確保する B の要素数は
+
+```c
+B_elems_alloc = B_elems * user_stride * outer_scale;
+```
+
+* dense のとき (`access_mode=0`)
+
+  * `stride_elems = 1` でアクセス
+  * ただし `user_stride` と `outer_scale` を掛けたぶん **余裕を持って確保**している
+* strided のとき (`access_mode=1`)
+
+  * `stride_elems = user_stride`
+  * 必要なサイズが `B_elems * user_stride * outer_scale` で、
+    ちょうど `B_elems_alloc` と一致
+
+この設計にしている理由:
+
+* **同じループ回数・同じ関数**のまま
+* `stride_elems` だけを変えて、
+
+  * 命令数はほぼ不変
+  * メモリアクセスのパターンと DRAM 到達率だけ変える
+    という比較がしやすくするため
 
 ---
 
-## Typical parameter choices
+## 典型的なパラメータ例
 
-On the current AMD server testbed we often use:
+* `A_bytes`
+
+  * コアの L1D より少し大きい程度
+  * 例: L1D = 32 KiB なら `A_bytes = 32*1024`
+* `B_bytes`
+
+  * LLC よりずっと大きくして、DRAM に十分届くようにする
+  * 例: `B_bytes = 512*1024*1024` (512 MiB)
+* `chunk_bytes`
+
+  * L2 くらいのオーダー、あるいはそのサブセット
+  * 例: `chunk_bytes = 512*1024` (512 KiB)
+* `access_mode` / `stride_elems`
+
+  * dense: `access_mode = 0`, `stride_elems` は何でも良い (確保サイズだけに効く)
+  * strided: `access_mode = 1`, 例えば
+
+    * `stride_elems = 8` (1 ラインに 1 要素程度)
+    * `stride_elems = 16` など
+* `outer_scale`
+
+  * ループ本体だけの IPC / MPKI を強調したいときに大きめにする
+  * 例: `outer_scale = 100`
+
+---
+
+## perf ラッパースクリプト (`run_perf_mpki.py`)
+
+### 概要
+
+このスクリプトは
+
+* `perf stat -x,` を呼び出して CSV を取る
+* 以下のカウンタをパース
+
+  * `cycles`
+  * `instructions`
+  * `L1-dcache-loads`
+  * `L1-dcache-load-misses`
+  * `l2_cache_accesses_from_dc_misses`
+  * `l2_cache_misses_from_dc_misses`
+  * DRAM 関連イベント（ノードによって違う）
+* そこから
+
+  * L1 miss rate
+  * L2 miss rate (L1D miss を母数)
+  * L1 / L2 MPKI
+  * DRAM fill PKI (demand fill per 1K instructions)
+  * IPC
+
+を計算して表示します。
+
+### 使い方
+
+形式:
 
 ```bash
-# 32 KiB A, 512 MiB logical B, 512 KiB chunks
-A_BYTES=$((32*1024))
-B_BYTES=$((512*1024*1024))
-CHUNK_BYTES=$((512*1024))
-
-# Dense (sequential B)
-./benchmark $A_BYTES $B_BYTES $CHUNK_BYTES 0 8
-
-# Strided B, stride = 8 elements
-./benchmark $A_BYTES $B_BYTES $CHUNK_BYTES 1 8
-
-# Same, but repeat the kernel 100 times
-./benchmark $A_BYTES $B_BYTES $CHUNK_BYTES 1 8 100
+./scripts/run_perf_mpki.py [--node demeter|artemis] <binary> [binary-args...]
 ```
 
-These correspond roughly to:
+#### 例 1: n05-demeter (EPYC, `ls_refills_from_sys.*` があるノード)
 
-* A: L1-sized thrash array.
-* B: large tail that goes well beyond LLC.
-* Chunk: medium granularity (around L2-sized), so we can talk about “per-chunk
-  coverage” in the context of wrong-path prefetch.
+`--node` を省略すると `demeter` モードになります。
 
----
-
-## `perf` wrapper: `run_perf_mpki.py`
-
-The Python script wraps `perf stat` and computes the metrics we care about.
-
-### Events
-
-It currently uses the following events (AMD terminology):
-
-```python
-EVENTS = [
-    "instructions",
-    "L1-dcache-loads",
-    "L1-dcache-load-misses",
-    "l2_cache_accesses_from_dc_misses",
-    "l2_cache_misses_from_dc_misses",
-    "ls_refills_from_sys.ls_mabresp_lcl_dram",
-    "ls_refills_from_sys.ls_mabresp_rmt_dram",
-]
+```bash
+./scripts/run_perf_mpki.py ./benchmark 32768 536870912 524288 1 16 100
 ```
 
-Rough meaning:
-
-* `instructions`
-  Total retired instructions (used as the denominator for MPKI/PKI).
-
-* `L1-dcache-loads`, `L1-dcache-load-misses`
-  Load accesses and the associated misses / fills in L1D.
-
-* `l2_cache_accesses_from_dc_misses`
-  L2 accesses that originate from L1D misses (including prefetches).
-
-* `l2_cache_misses_from_dc_misses`
-  Subset of the above that miss in L2 as well.
+このモードでは DRAM fill を
 
 * `ls_refills_from_sys.ls_mabresp_lcl_dram`
-  Demand D-cache fills that are sourced from local DRAM / IO.
-
 * `ls_refills_from_sys.ls_mabresp_rmt_dram`
-  Demand D-cache fills from remote DRAM / IO.
 
-The last two together are our “DRAM demand fills”.
+の合計としてカウントします。
 
-If your CPU has different event names, edit `EVENTS` to match your `perf list`
-output.
-
-### Usage
-
-From the repo root:
+#### 例 2: n07-artemis (`ls_dmnd_fills_from_sys.mem_io_local` のみ)
 
 ```bash
-./scripts/run_perf_mpki.py ./benchmark 32768 536870912 524288 1 8
+./scripts/run_perf_mpki.py --node artemis ./benchmark 32768 536870912 524288 1 16 100
 ```
 
-You can pass any additional benchmark arguments after the binary name, exactly
-the same as when calling `./benchmark` directly.
+このモードでは DRAM fill を
 
-### Output format
+* `ls_dmnd_fills_from_sys.mem_io_local` の値を **local 分として使用**
+* remote は 0 とみなす
 
-The script prints:
+として扱います。
 
-1. **Raw `perf` CSV output** (stderr), so you can copy it into a log or parse
-   it later if needed:
+### 出力フォーマット
 
-   ```text
-   === perf raw output (stderr) ===
-   4651578578,,instructions:u,631451314,71.31,,
-   89461602,,L1-dcache-loads:u,631901862,71.37,,
-   134683770,,L1-dcache-load-misses:u,632899224,71.48,150.55,of all L1-dcache accesses
-   ...
-   ```
+1. `perf` の生の stderr (CSV)
+2. パースしたカウンタの一覧
+3. miss rate と IPC
+4. MPKI / PKI
 
-2. **Parsed counters**:
+例:
 
-   ```text
-   === Parsed counters ===
-   instructions            : 4651578578
-   L1-dcache-loads         : 89461602
-   L1-dcache-load-misses   : 134683770
-   l2_cache_accesses_from_dc_misses : 134746203
-   l2_cache_misses_from_dc_misses   : 14091861
-   DRAM fills (local+remote): 57975543 (local=57975527, remote=16)
-   ```
+```text
+=== perf raw output (stderr) ===
+... (perf の出力そのまま) ...
 
-3. **Rates**:
+=== Parsed counters ===
+node                    : demeter
+cycles                 : 1921158234
+instructions           : 4649560413
+L1-dcache-loads        : 78971700
+L1-dcache-load-misses  : 134840330
+l2_cache_accesses_from_dc_misses : 134891535
+l2_cache_misses_from_dc_misses   : 13975630
+DRAM fills (local+remote): 57480933 (local=57480933, remote=0)
 
-   ```text
-   === Rates ===
-   L1 miss rate            : 150.55 %
-   L2 miss rate (on L1D misses): 10.46 %
-   ```
+=== Rates / IPC ===
+L1 miss rate           : 170.75 %
+L2 miss rate (on L1D misses): 10.36 %
+IPC                    : 2.420
 
-   Note: the L1 “miss rate” can exceed 100% because the event definition counts
-   fills in a way that is not strictly “misses / loads” in the textbook sense
-   (prefetch, write-alloc, etc.). We treat it as “L1D fills per L1D access.”
+=== Per-1K-instruction metrics (MPKI/PKI) ===
+L1 MPKI                : 28.954
+L2 MPKI                : 3.029
+DRAM fill PKI (local+remote): 12.464
+```
 
-4. **Per-1K-instruction metrics** (MPKI / PKI):
+ここで
 
-   ```text
-   === Per-1K-instruction metrics (MPKI/PKI) ===
-   L1 MPKI                 : 28.954
-   L2 MPKI                 : 3.029
-   DRAM fill PKI (local+remote): 12.464
-   ```
+* **L1 MPKI / L2 MPKI**
 
-   Definitions:
+  * それぞれ「L1/L2 ミス数 / 1000 命令」
+* **DRAM fill PKI**
 
-   * **L1 MPKI** = `L1-dcache-load-misses / (instructions / 1000)`
-   * **L2 MPKI** = `l2_cache_misses_from_dc_misses / (instructions / 1000)`
-   * **DRAM fill PKI** =
-     `(ls_refills_from_sys.ls_mabresp_lcl_dram + ls_refills_from_sys.ls_mabresp_rmt_dram) / (instructions / 1000)`
-
-   We call the last one **PKI** (“fills per kilo-instruction”) instead of MPKI
-   because they are fills from DRAM, not cache misses in the strict sense.
+  * `ls_refills_from_sys...` / `ls_dmnd_fills_from_sys...` の合計を
+    「デマンドの DRAM フィル回数 / 1000 命令」として解釈
 
 ---
 
-## How this ties into wrong-path prefetch experiments
+## 何を見ればいいか
 
-The eventual experiment is:
+* **L1 MPKI / L2 MPKI**
 
-* Introduce a wrong-path / loop-tail prefetch mechanism (e.g., via modified
-  trace or simulator).
-* Compare:
+  * stride を大きくすると通常は増加
+  * outer_scale を大きくすると、初期化の影響が薄まり **ループ本体のミス特性**が素直に出る
+* **DRAM fill PKI**
 
-  * **DRAM fill PKI** before vs after
-    → demand DRAM fills should go down.
-  * Breakdown between demand vs prefetch-driven DRAM activity (future work:
-    add HW/SW prefetch events).
-  * L1 / L2 MPKI and IPC.
+  * 「このループがどれくらい DRAM を叩いているか」のざっくり指標
+  * wrong-path prefetch の評価では
 
-This microbenchmark and `run_perf_mpki.py` give a controlled environment where:
-
-* The loop body is simple and reproducible.
-* You can switch between dense vs strided tail accesses and adjust stride
-  length.
-* You can quickly see how changes in access pattern affect:
-
-  * L1/L2 MPKI
-  * DRAM demand fill PKI
+    * DRAM fill の絶対数は大きく変わらなくても
+    * **デマンド vs プリフェッチの比率**が変わることを見たい
+      → そのときのベースラインとして使う
 
 ---
 
-## Caveats / TODO
+## 注意・限界
 
-* Event names are AMD-specific; for Intel or other vendors, the `EVENTS` list
-  will need to be adapted.
-* The benchmark does not try to eliminate all sources of variation
-  (TLB behavior, page mapping, NUMA placement, etc.).
-* For very small `kernel_reps`, initialization costs may still dilute the
-  measured MPKI/PKI. Increase `kernel_reps` when in doubt.
+* これは **かなりシンプルなストリーム系マイクロベンチ**です。
 
-Pull requests or local branches that add:
+  * TLB, スnoop, コヒーレンシ, 仮想化など、現実の OS/アプリでは効いてくる要素はほぼ入っていません。
+* `perf` イベント名は CPU 世代やカーネルによって違うので、
 
-* instruction-only region timing,
-* more detailed prefetch breakdown,
-* or multi-thread variants
+  * 新しいノードで使うときは一度 `perf list` を確認して、
+  * 必要なら `run_perf_mpki.py` のイベント定義を増やす前提です。
+* `perf_event_paranoid` の値によっては、そもそもカーネルで perf が制限されていて使えない場合もあります。
 
-are welcome.
+---
 
+この README をベースにしておけば、後で
+
+* 「この数字おかしくない？」となったときの前提確認
+* 新しいノードに持っていったときのポーティング作業
+
+がだいぶ楽になるはずです。必要なら「推奨パラメータセット (dense/stride × outer_scale)」を表にして追記するのもアリです。
