@@ -19,7 +19,7 @@ static double run_kernel(double *A, double *C,
                          size_t A_elems,
                          size_t logical_B_elems,  // stride=1 のときに相当する「論理 B サイズ」
                          size_t chunk_elems,
-                         size_t stride_elems)     // dense:1, stride:8 など（実効ストライド）
+                         size_t stride_elems)     // dense:1, stride:8 など
 {
     // 「論理 B」を chunk に分割したときの外側ループ回数
     size_t outer_iters = logical_B_elems / chunk_elems;
@@ -37,8 +37,8 @@ static double run_kernel(double *A, double *C,
         size_t base = outer * chunk_elems * stride_elems;
 
         // chunk_elems 回だけ必ずループする
-        // dense:  stride=1 → C[base + 0,1,2,...]
-        // stride: stride=8 → C[base + 0,8,16,...]
+        //   dense:  stride=1 → C[base + 0,1,2,...]
+        //   stride: stride=8 → C[base + 0,8,16,...]
         for (size_t j = 0; j < chunk_elems; j++) {
             size_t idx = base + j * stride_elems;
             sum += C[idx];
@@ -48,23 +48,15 @@ static double run_kernel(double *A, double *C,
     return sum;
 }
 
-static void usage(const char *prog)
-{
-    fprintf(stderr,
-        "Usage: %s A_bytes B_bytes chunk_bytes [access_mode] [stride_elems]\n"
-        "  A_bytes      : size of array A in bytes (e.g. 32768)\n"
-        "  B_bytes      : logical B size in bytes (e.g. 536870912)\n"
-        "  chunk_bytes  : chunk size in bytes (must divide B_bytes)\n"
-        "  access_mode  : 0=dense, 1=strided (default=0)\n"
-        "  stride_elems : base stride (used for allocation and strided mode,\n"
-        "                 default=8; dense mode still uses stride=1 in kernel)\n",
-        prog);
-}
-
 int main(int argc, char **argv)
 {
     if (argc < 4) {
-        usage(argv[0]);
+        fprintf(stderr,
+            "Usage: %s A_bytes B_bytes chunk_bytes [access_mode] [stride_elems] [kernel_reps]\n"
+            "  access_mode  : 0=dense, 1=strided (default=0)\n"
+            "  stride_elems : used only when access_mode=1 (default=8)\n"
+            "  kernel_reps  : how many times to repeat run_kernel (default=1)\n",
+            argv[0]);
         return 1;
     }
 
@@ -72,8 +64,9 @@ int main(int argc, char **argv)
     size_t B_bytes     = strtoull(argv[2], NULL, 0);  // 「論理 B サイズ」
     size_t chunk_bytes = strtoull(argv[3], NULL, 0);
 
-    int access_mode = 0;      // 0=dense, 1=strided
-    size_t user_stride = 8;   // 「基準ストライド」: C のサイズ計算に使う
+    int access_mode = 0;
+    size_t user_stride = 8;   // デフォルトのストライド（メモリ確保用）
+    size_t kernel_reps = 1;   // run_kernel の繰り返し回数（デフォルト 1）
 
     if (argc >= 5) {
         access_mode = atoi(argv[4]);  // 0 or 1
@@ -85,11 +78,16 @@ int main(int argc, char **argv)
             return 1;
         }
     }
-
-    if (access_mode != 0 && access_mode != 1) {
-        fprintf(stderr, "access_mode must be 0 (dense) or 1 (strided)\n");
-        return 1;
+    if (argc >= 7) {
+        kernel_reps = strtoull(argv[6], NULL, 0);
+        if (kernel_reps == 0) {
+            fprintf(stderr, "kernel_reps must be >= 1\n");
+            return 1;
+        }
     }
+
+    // dense のときは stride=1 として扱う（ここで分岐しておけば、カーネル内には分岐が出ない）
+    size_t stride_elems = (access_mode == 0) ? 1 : user_stride;
 
     size_t A_elems          = A_bytes     / sizeof(double);
     size_t logical_B_elems  = B_bytes     / sizeof(double);
@@ -104,24 +102,10 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    // ★ C のサイズは「常に user_stride 基準」で決める（mode に依存しない）
-    //
-    //  dense(run: access_mode=0):
-    //    - カーネル内の実効ストライド stride_elems = 1
-    //    - C_elems = logical_B_elems * user_stride だけ確保＆初期化するが、
-    //      実際にアクセスするのは先頭 logical_B_elems 要素だけ
-    //
-    //  strided(run: access_mode=1):
-    //    - カーネル内の実効ストライド stride_elems = user_stride
-    //    - idx の最大値は logical_B_elems*user_stride - 1 なので
-    //      ちょうど C の全体を使い切る
-    //
-    //  → access_mode=0/1 どちらでも C_elems は同じになる
-    //
+    // stride_elems に関わらず、dense/stride で同じ C サイズにするため user_stride を使う
+    //   dense:  access_mode=0 → stride_elems=1 だが C_elems は logical_B_elems * user_stride
+    //   stride: access_mode=1 → stride_elems=user_stride
     size_t C_elems = logical_B_elems * user_stride;
-
-    // カーネル内で使う実効ストライド
-    size_t stride_elems = (access_mode == 0) ? 1 : user_stride;
 
     printf("# Params:\n");
     printf("#   A_bytes      = %zu\n", A_bytes);
@@ -134,6 +118,7 @@ int main(int argc, char **argv)
     printf("#   access_mode  = %d (0=dense,1=strided)\n", access_mode);
     printf("#   user_stride  = %zu (for allocation)\n", user_stride);
     printf("#   stride_elems = %zu (effective in kernel)\n", stride_elems);
+    printf("#   kernel_reps  = %zu\n", kernel_reps);
 
     double *A = (double *)malloc(sizeof(double) * A_elems);
     double *C = (double *)malloc(sizeof(double) * C_elems);
@@ -147,11 +132,16 @@ int main(int argc, char **argv)
     init_array(A, A_elems, 1.0);
     init_array(C, C_elems, 1000.0);
 
-    double sum = run_kernel(A, C,
-                            A_elems,
-                            logical_B_elems,
-                            chunk_elems,
-                            stride_elems);
+    double sum = 0.0;
+
+    // 上位ループで run_kernel を繰り返すだけ（カーネル内は一切変更しない）
+    for (size_t rep = 0; rep < kernel_reps; rep++) {
+        sum += run_kernel(A, C,
+                          A_elems,
+                          logical_B_elems,
+                          chunk_elems,
+                          stride_elems);
+    }
 
     sink = sum; // 最適化防止
 
