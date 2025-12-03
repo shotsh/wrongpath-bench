@@ -2,21 +2,20 @@
 import argparse
 import csv
 import datetime
-import os
 import subprocess
 import re
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+# 作業ディレクトリ（シンボリックリンク経由でも OK）
+ROOT = Path.cwd()
 CONFIG_PATH = ROOT / "configs" / "cases.csv"
 RESULT_ROOT = ROOT / "results"
 BENCH = ROOT / "benchmark"
 RUN_PERF = ROOT / "scripts" / "run_perf_mpki.py"
 
-# perf の出力からサマリを抜くための簡単な正規表現
-RE_IPC = re.compile(r"^IPC\s*:\s*([0-9.]+)")
-RE_L1_MPKI = re.compile(r"^L1 MPKI\s*:\s*([0-9.]+)")
-RE_L2_MPKI = re.compile(r"^L2 MPKI\s*:\s*([0-9.]+)")
+RE_IPC      = re.compile(r"^IPC\s*:\s*([0-9.]+)")
+RE_L1_MPKI  = re.compile(r"^L1 MPKI\s*:\s*([0-9.]+)")
+RE_L2_MPKI  = re.compile(r"^L2 MPKI\s*:\s*([0-9.]+)")
 RE_DRAM_PKI = re.compile(r"^DRAM fill PKI .*:\s*([0-9.]+)")
 
 def load_cases():
@@ -27,52 +26,103 @@ def load_cases():
             cases[row["case_id"]] = row
     return cases
 
+def build_argv_list(case):
+    """
+    cases.csv の 1 行から、benchmark に渡す引数リストを作る。
+      A_bytes B_bytes chunk_bytes [access_mode] [stride_elems] [outer_scale]
+    """
+    args = []
+
+    # 必須3つ
+    for key in ["A_bytes", "B_bytes", "chunk_bytes"]:
+        raw = (case.get(key) or "").strip()
+        if not raw:
+            raise ValueError(f"{key} is empty for case_id={case.get('case_id')}")
+        val = int(raw, 0)  # 10進でも 0x8000 でも OK
+        args.append(str(val))
+
+    # optional3つ（左から順に埋める前提）
+    opt_keys = ["access_mode", "stride_elems", "outer_scale"]
+    opt_raws = [(case.get(k) or "").strip() for k in opt_keys]
+
+    # 途中だけ空欄があるとややこしいのでチェック
+    seen_empty = False
+    for k, raw in zip(opt_keys, opt_raws):
+        if raw == "":
+            seen_empty = True
+        else:
+            if seen_empty:
+                raise ValueError(
+                f"case_id={case.get('case_id')}: '{k}' is set but a previous optional field is empty"
+                )
+
+    for raw in opt_raws:
+        if raw != "":
+            val = int(raw, 0)
+            args.append(str(val))
+        else:
+            break
+
+    return args
+
 def run_one_case(case, outdir):
     """1ケース分実行して、生ログとサマリ行を返す。"""
     case_id = case["case_id"]
-    desc = case.get("desc", "")
+    description = (case.get("description") or "").strip()  # あってもなくてもOK
 
-    A_KiB = int(case["A_KiB"])
-    B_MiB = int(case["B_MiB"])
-    chunk_KiB = int(case["chunk_KiB"])
-    B_stride = int(case["B_stride_elems"])
-    outer_scale = int(case["outer_scale"])
-    kernel_reps = int(case["kernel_reps"])
+    argv = build_argv_list(case)
 
-    A_BYTES = A_KiB * 1024
-    B_BYTES = B_MiB * 1024 * 1024
-    CHUNK_BYTES = chunk_KiB * 1024
+    A_bytes     = int(argv[0])
+    B_bytes     = int(argv[1])
+    chunk_bytes = int(argv[2])
+
+    access_mode  = int(argv[3]) if len(argv) >= 4 else None
+    stride_elems = int(argv[4]) if len(argv) >= 5 else None
+    outer_scale  = int(argv[5]) if len(argv) >= 6 else None
 
     outdir.mkdir(parents=True, exist_ok=True)
     logfile = outdir / f"perf_{case_id}.txt"
 
     print(f"== Running case {case_id} ==")
-    print(f"  desc            : {desc}")
-    print(f"  A_bytes         : {A_BYTES} ({A_KiB} KiB)")
-    print(f"  B_bytes         : {B_BYTES} ({B_MiB} MiB)")
-    print(f"  chunk_bytes     : {CHUNK_BYTES} ({chunk_KiB} KiB)")
-    print(f"  B_stride_elems  : {B_stride}")
-    print(f"  outer_scale     : {outer_scale}")
-    print(f"  kernel_reps     : {kernel_reps}")
+    print(f"  A_bytes      : {A_bytes}")
+    print(f"  B_bytes      : {B_bytes}")
+    print(f"  chunk_bytes  : {chunk_bytes}")
+    print(f"  access_mode  : {access_mode}")
+    print(f"  stride_elems : {stride_elems}")
+    print(f"  outer_scale  : {outer_scale}")
+    if description:
+        print(f"  description  : {description}")
     print()
 
-    cmd = [
-        "python3", str(RUN_PERF),
-        str(BENCH),
-        str(A_BYTES),
-        str(B_BYTES),
-        str(CHUNK_BYTES),
-        str(outer_scale),
-        str(B_stride),
-        str(kernel_reps),
-    ]
+    cmd = ["python3", str(RUN_PERF), str(BENCH)] + [str(x) for x in argv]
 
-    # 実行して stdout をファイルにも保存
-    proc = subprocess.run(cmd, capture_output=True, text=True, check=True)
-    stdout = proc.stdout
-    stderr = proc.stderr
+    # Python 3.6 対応の subprocess
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        universal_newlines=True,
+    )
+    stdout, stderr = proc.communicate()
 
+    # ターミナルにもそのまま perf の出力を表示
+    print("=== STDOUT (run_perf_mpki) ===")
+    print(stdout, end="")
+    print("\n=== STDERR (run_perf_mpki) ===")
+    print(stderr, end="")
+    print()
+
+    if proc.returncode != 0:
+        raise RuntimeError(
+            "run_perf failed for case {cid} with code {code}\ncmd: {cmd}\nstderr:\n{stderr}".format(
+                cid=case_id, code=proc.returncode, cmd=" ".join(cmd), stderr=stderr
+            )
+        )
+
+    # 生ログをファイルに保存
     with open(logfile, "w") as f:
+        f.write("=== CMD ===\n")
+        f.write(" ".join(cmd) + "\n\n")
         f.write("=== STDOUT ===\n")
         f.write(stdout)
         f.write("\n\n=== STDERR ===\n")
@@ -99,22 +149,27 @@ def run_one_case(case, outdir):
             continue
 
     if ipc is None or l1_mpki is None or l2_mpki is None or dram_pki is None:
-        print(f"Warning: failed to parse some metrics for {case_id}")
+        print("Warning: failed to parse some metrics for {cid}".format(cid=case_id))
+    else:
+        # パースできた場合は 1 行サマリも出す
+        print("  ==> Parsed summary: IPC={:.3f}, L1_MPKI={:.3f}, L2_MPKI={:.3f}, DRAM_PKI={:.3f}".format(
+            ipc, l1_mpki, l2_mpki, dram_pki
+        ))
+    print()
 
-    # サマリ行の dict を返す
     return {
         "case_id": case_id,
-        "desc": desc,
-        "A_bytes": A_BYTES,
-        "B_bytes": B_BYTES,
-        "chunk_bytes": CHUNK_BYTES,
-        "B_stride_elems": B_stride,
+        "A_bytes": A_bytes,
+        "B_bytes": B_bytes,
+        "chunk_bytes": chunk_bytes,
+        "access_mode": access_mode,
+        "stride_elems": stride_elems,
         "outer_scale": outer_scale,
-        "kernel_reps": kernel_reps,
         "IPC": ipc,
         "L1_MPKI": l1_mpki,
         "L2_MPKI": l2_mpki,
         "DRAM_PKI": dram_pki,
+        "description": description,  # サマリでは最後の列
     }
 
 def main():
@@ -140,7 +195,6 @@ def main():
     else:
         parser.error("either --all or --case must be specified")
 
-    # 日付ごとにフォルダを分ける
     date_str = datetime.datetime.now().strftime("%Y%m%d")
     outdir = RESULT_ROOT / date_str
     outdir.mkdir(parents=True, exist_ok=True)
@@ -150,19 +204,21 @@ def main():
 
     for cid in target_ids:
         if cid not in cases:
-            print(f"Error: case_id '{cid}' not found in {CONFIG_PATH}")
+            print("Error: case_id '{cid}' not found in {cfg}".format(
+                cid=cid, cfg=CONFIG_PATH
+            ))
             continue
         row = run_one_case(cases[cid], outdir)
         summary_rows.append(row)
 
     if summary_rows:
-        # CSV に追記。初回はヘッダ付きで書く
         write_header = not summary_path.exists()
         fieldnames = [
-            "case_id", "desc",
+            "case_id",
             "A_bytes", "B_bytes", "chunk_bytes",
-            "B_stride_elems", "outer_scale", "kernel_reps",
+            "access_mode", "stride_elems", "outer_scale",
             "IPC", "L1_MPKI", "L2_MPKI", "DRAM_PKI",
+            "description",  # 最後に description
         ]
         with open(summary_path, "a", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -171,8 +227,7 @@ def main():
             for r in summary_rows:
                 writer.writerow(r)
 
-        print()
-        print(f"Wrote summary to {summary_path}")
+        print("Wrote summary to {path}".format(path=summary_path))
 
 if __name__ == "__main__":
     main()
