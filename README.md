@@ -271,7 +271,7 @@ L1-dcache-loads        : 78971700
 L1-dcache-load-misses  : 134840330
 l2_cache_accesses_from_dc_misses : 134891535
 l2_cache_misses_from_dc_misses   : 13975630
-DRAM fills (local+remote): 57480933 (local=57480933, remote=0)
+Demand DRAM fills (L1D): 57480933 (local=57480933, remote=0)
 
 === Rates / IPC ===
 L1 miss rate           : 170.75 %
@@ -281,7 +281,7 @@ IPC                    : 2.420
 === Per-1K-instruction metrics (MPKI/PKI) ===
 L1 MPKI                : 28.954
 L2 MPKI                : 3.029
-DRAM fill PKI (local+remote): 12.464
+Demand DRAM fills (L1D) PKI : 12.464
 ```
 
 ここで

@@ -189,10 +189,10 @@ def main():
     print("l2_cache_accesses_from_dc_misses : {}".format(l2_access_from_l1d_miss))
     print("l2_cache_misses_from_dc_misses   : {}".format(l2_miss))
     if node == "demeter":
-        print("DRAM fills (local+remote): {} (local={}, remote={})"
+        print("Demand DRAM fills (L1D): {} (local={}, remote={})"
               .format(dram_total, dram_local, dram_remote))
     else:
-        print("DRAM fills (local+remote): {} (local={}, remote assumed=0)"
+        print("Demand DRAM fills (L1D): {} (local={}, remote assumed=0)"
               .format(dram_total, dram_local))
 
     print()
@@ -229,7 +229,7 @@ def main():
 
     print("L1 MPKI                : {:.3f}".format(l1_mpki))
     print("L2 MPKI                : {:.3f}".format(l2_mpki))
-    print("DRAM fill PKI (local+remote): {:.3f}".format(dram_pki))
+    print("Demand DRAM fills (L1D) PKI : {:.3f}".format(dram_pki))
 
 
 if __name__ == "__main__":

@@ -53,7 +53,8 @@ def build_argv_list(case):
         else:
             if seen_empty:
                 raise ValueError(
-                f"case_id={case.get('case_id')}: '{k}' is set but a previous optional field is empty"
+                    "case_id={cid}: '{k}' is set but a previous optional field is empty"
+                    .format(cid=case.get("case_id"), k=k)
                 )
 
     for raw in opt_raws:
@@ -81,18 +82,29 @@ def run_one_case(case, outdir):
     outer_scale  = int(argv[5]) if len(argv) >= 6 else None
 
     outdir.mkdir(parents=True, exist_ok=True)
-    logfile = outdir / f"perf_{case_id}.txt"
 
-    print(f"== Running case {case_id} ==")
-    print(f"  A_bytes      : {A_bytes}")
-    print(f"  B_bytes      : {B_bytes}")
-    print(f"  chunk_bytes  : {chunk_bytes}")
-    print(f"  access_mode  : {access_mode}")
-    print(f"  stride_elems : {stride_elems}")
-    print(f"  outer_scale  : {outer_scale}")
+    # ★ ここでタイムスタンプ付きファイル名を作る
+    ts = datetime.datetime.now().strftime("%y%m%d%H%M%S")  # yymmddHHMMSS
+    logfile = outdir / "perf_{cid}_{ts}.txt".format(cid=case_id, ts=ts)
+
+    # ヘッダブロック（ターミナル & ログファイル共通）
+    header_lines = [
+        "== Running case {cid} ==".format(cid=case_id),
+        "  log_file    : {name}".format(name=logfile.name),
+        "  A_bytes      : {v}".format(v=A_bytes),
+        "  B_bytes      : {v}".format(v=B_bytes),
+        "  chunk_bytes  : {v}".format(v=chunk_bytes),
+        "  access_mode  : {v}".format(v=access_mode),
+        "  stride_elems : {v}".format(v=stride_elems),
+        "  outer_scale  : {v}".format(v=outer_scale),
+    ]
     if description:
-        print(f"  description  : {description}")
-    print()
+        header_lines.append("  description  : {d}".format(d=description))
+
+    header_text = "\n".join(header_lines) + "\n"
+
+    # ターミナルに表示
+    print(header_text)
 
     cmd = ["python3", str(RUN_PERF), str(BENCH)] + [str(x) for x in argv]
 
@@ -105,7 +117,7 @@ def run_one_case(case, outdir):
     )
     stdout, stderr = proc.communicate()
 
-    # ターミナルにもそのまま perf の出力を表示
+    # ターミナルにも perf の出力をそのまま表示
     print("=== STDOUT (run_perf_mpki) ===")
     print(stdout, end="")
     print("\n=== STDERR (run_perf_mpki) ===")
@@ -119,9 +131,10 @@ def run_one_case(case, outdir):
             )
         )
 
-    # 生ログをファイルに保存
+    # 生ログをファイルに保存（ヘッダ → CMD → STDOUT → STDERR の順）
     with open(logfile, "w") as f:
-        f.write("=== CMD ===\n")
+        f.write(header_text)
+        f.write("\n=== CMD ===\n")
         f.write(" ".join(cmd) + "\n\n")
         f.write("=== STDOUT ===\n")
         f.write(stdout)
@@ -151,10 +164,12 @@ def run_one_case(case, outdir):
     if ipc is None or l1_mpki is None or l2_mpki is None or dram_pki is None:
         print("Warning: failed to parse some metrics for {cid}".format(cid=case_id))
     else:
-        # パースできた場合は 1 行サマリも出す
-        print("  ==> Parsed summary: IPC={:.3f}, L1_MPKI={:.3f}, L2_MPKI={:.3f}, DRAM_PKI={:.3f}".format(
-            ipc, l1_mpki, l2_mpki, dram_pki
-        ))
+        print(
+            "  ==> Parsed summary: IPC={:.3f}, L1_MPKI={:.3f}, "
+            "L2_MPKI={:.3f}, DRAM_PKI={:.3f}".format(
+                ipc, l1_mpki, l2_mpki, dram_pki
+            )
+        )
     print()
 
     return {
