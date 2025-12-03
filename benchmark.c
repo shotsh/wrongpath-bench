@@ -12,32 +12,32 @@ static void init_array(double *p, size_t n, double base)
     }
 }
 
-// A で L1 を荒らしつつ、B を chunk ごとにアクセスするカーネル
-//  - outer/inner のループ回数は stride に依存しない
-//  - stride_elems だけが dense/stride の違いを表現する
-//  - outer_scale は「この関数を何回呼ぶか」で制御する（関数内には入れない）
+// Kernel that thrashes L1 using A while accessing B in chunks
+//  - The outer/inner loop counts do not depend on stride
+//  - Only stride_elems represents the difference between dense/strided
+//  - outer_scale is controlled by "how many times we call this function" (kept outside the function)
 static double run_kernel(double *A, double *B,
                          size_t A_elems,
-                         size_t B_elems,      // stride=1 のときの B の要素数
+                         size_t B_elems,      // B element count when stride=1
                          size_t elems_per_iter,
-                         size_t stride_elems) // dense:1, stride:8 など
+                         size_t stride_elems) // dense:1, stride:8, etc.
 {
-    // B を chunk に分割したときの外側ループ回数
+    // Number of outer-loop iterations when B is divided into chunks
     size_t outer_iters = B_elems / elems_per_iter;
 
     double sum = 0.0;
 
     for (size_t outer = 0; outer < outer_iters; outer++) {
-        // A 全体をなめて L1 を吹き飛ばす
+        // Sweep the entire A to blow L1 away
         for (size_t i = 0; i < A_elems; i++) {
             sum += A[i];
         }
 
-        // この chunk に対応する B 側の先頭インデックス
-        // stride_elems を掛けたぶんだけ B 上の範囲が広がる
+        // Starting index in B corresponding to this chunk
+        // The range on B expands by stride_elems
         size_t base = outer * elems_per_iter * stride_elems;
 
-        // elems_per_iter 回だけ必ずループする
+        // Always loop exactly elems_per_iter times
         // dense:  stride=1  → B[base + 0,1,2,...]
         // stride: stride=8 → B[base + 0,8,16,...]
         for (size_t j = 0; j < elems_per_iter; j++) {
@@ -66,8 +66,8 @@ int main(int argc, char **argv)
     size_t chunk_bytes = strtoull(argv[3], NULL, 0);
 
     int    access_mode = 0;  // 0=dense, 1=strided
-    size_t user_stride = 8;  // B の確保にも使うストライド
-    size_t outer_scale = 1;  // run_kernel を何回呼ぶか
+    size_t user_stride = 8;  // Stride also used to size the B allocation
+    size_t outer_scale = 1;  // How many times to call run_kernel
 
     if (argc >= 5) {
         access_mode = atoi(argv[4]);  // 0 or 1
@@ -87,7 +87,7 @@ int main(int argc, char **argv)
         }
     }
 
-    // dense のときは stride=1 として扱う（カーネル内には分岐を出さない）
+    // Treat dense as stride=1 (no branches inside the kernel)
     size_t stride_elems = (access_mode == 0) ? 1 : user_stride;
 
     size_t A_elems     = A_bytes     / sizeof(double);
@@ -103,28 +103,28 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    // user_stride に応じて B の実メモリサイズを広げる
+    // Enlarge the actual memory size of B according to user_stride
     //
-    // run_kernel 1 回で必要な B 要素数は
+    // The number of B elements needed for a single run of run_kernel is:
     //   required = outer_iters * elems_per_iter * stride_elems
     //            = (B_elems / elems_per_iter) * elems_per_iter * stride_elems
     //            = B_elems * stride_elems
     //
-    // access_mode == 0 (dense) のとき:
+    // When access_mode == 0 (dense):
     //   stride_elems = 1
     //   required = B_elems
     //   B_elems_alloc = B_elems * user_stride >= required
     //
-    // access_mode == 1 (strided) のとき:
+    // When access_mode == 1 (strided):
     //   stride_elems = user_stride
     //   required = B_elems * user_stride
-    //   B_elems_alloc と一致
+    //   Matches B_elems_alloc
     //
-    // outer_scale は「何回 run_kernel を繰り返すか」だけに影響し、
-    // 追加の領域は不要（同じ領域を何度も読むだけ）。
+    // outer_scale only affects "how many times run_kernel is repeated",
+    // and no additional space is needed (the same region is read multiple times).
     size_t B_elems_alloc = B_elems * user_stride;
 
-    // 情報表示
+    // Print configuration info
     size_t base_outer_iters = B_elems / elems_per_iter;
     size_t total_outer_iters = base_outer_iters * outer_scale;
 
@@ -158,8 +158,8 @@ int main(int argc, char **argv)
 
     double sum = 0.0;
 
-    // outer_scale 回だけ同じカーネルを繰り返す
-    // （命令列は同じで、統計量を稼ぐために実行時間とカウントだけ増やす）
+    // Repeat the same kernel outer_scale times
+    // (The instruction stream is the same; we just increase runtime and counts to gather statistics)
     for (size_t rep = 0; rep < outer_scale; rep++) {
         sum += run_kernel(A, B,
                           A_elems,
@@ -168,7 +168,7 @@ int main(int argc, char **argv)
                           stride_elems);
     }
 
-    sink = sum; // 最適化防止
+    sink = sum; // Prevent optimization
 
     printf("sum = %.6f\n", sum);
 
