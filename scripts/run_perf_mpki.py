@@ -1,7 +1,16 @@
 #!/usr/bin/env python3
-import subprocess
 import sys
+import subprocess
 
+# このスクリプトの使い方:
+#   ./scripts/run_perf_mpki.py <binary> [binary args...]
+#
+# 例:
+#   ./scripts/run_perf_mpki.py ./benchmark 32768 536870912 524288 1 8
+#
+# 前提:
+#   - perf がインストール済み
+#   - イベント名は perf list で存在すること
 
 EVENTS = [
     "instructions",
@@ -13,32 +22,31 @@ EVENTS = [
     "ls_refills_from_sys.ls_mabresp_rmt_dram",
 ]
 
-
-def run_perf(cmd):
-    perf_cmd = [
+def run_perf(binary, args):
+    cmd = [
         "perf", "stat",
-        "-x,",  # CSV っぽい区切り
+        "-x", ",",          # CSV 形式
+        "--no-big-num",     # 桁区切りなし
     ]
     for ev in EVENTS:
-        perf_cmd += ["-e", ev]
-    perf_cmd.append("--")
-    perf_cmd += cmd
+        cmd += ["-e", ev]
+    cmd.append(binary)
+    cmd += args
 
-    # Python 3.6 用: text= ではなく universal_newlines=
-    proc = subprocess.run(
-        perf_cmd,
+    # Python 3.6 対応: text= ではなく universal_newlines=
+    result = subprocess.run(
+        cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         universal_newlines=True,
     )
+    return result
 
-    return proc.returncode, proc.stdout, proc.stderr
 
-
-def parse_perf_csv(stderr_text):
+def parse_perf_stderr(stderr_text):
     """
-    perf stat -x, の stderr から
-    { イベント名(正規化) -> 値(int) } の dict を作る
+    perf stat -x, の stderr をパースして、
+    {イベント名: 値(int)} の dict を返す。
     """
     counters = {}
 
@@ -46,11 +54,8 @@ def parse_perf_csv(stderr_text):
         line = line.strip()
         if not line:
             continue
-        # perf のメッセージ行はスキップ
-        if not any(ch.isdigit() for ch in line.split(",")[0]):
-            # 先頭フィールドが数値っぽくないものは捨てる
-            continue
 
+        # 形式: value,unit,event,.... (カンマ区切り)
         parts = line.split(",")
         if len(parts) < 3:
             continue
@@ -58,85 +63,97 @@ def parse_perf_csv(stderr_text):
         value_str = parts[0].strip()
         event_raw = parts[2].strip()
 
+        # "<not counted>" の行などはスキップ
+        if value_str in ("<not counted>", "<not supported>"):
+            continue
+
+        # 値パース
         try:
             value = int(value_str)
         except ValueError:
-            # <not counted> など
             continue
 
-        # "instructions:u" → "instructions" に正規化
-        event_name = event_raw.split(":", 1)[0]
+        # event_raw には "instructions:u" のように :u が付くので落とす
+        event_name = event_raw.split(":")[0]
 
-        counters[event_name] = value
+        # 我々が指定した名前だけを拾う
+        if event_name in EVENTS:
+            counters[event_name] = value
 
     return counters
 
 
-def print_summary(counters):
-    def get(name):
-        return counters.get(name, 0)
-
-    instr = get("instructions")
-    l1_loads = get("L1-dcache-loads")
-    l1_miss = get("L1-dcache-load-misses")
-    l2_acc = get("l2_cache_accesses_from_dc_misses")
-    l2_miss = get("l2_cache_misses_from_dc_misses")
-    dram_local = get("ls_refills_from_sys.ls_mabresp_lcl_dram")
-    dram_remote = get("ls_refills_from_sys.ls_mabresp_rmt_dram")
-    dram_total = dram_local + dram_remote
-
-    if instr == 0:
-        print("instructions is 0, cannot compute MPKI")
-        return
-
-    kinst = instr / 1000.0
-
-    l1_mpki = l1_miss / kinst
-    l2_mpki = l2_miss / kinst
-    dram_mpki = dram_total / kinst
-
-    l1_miss_rate = (l1_miss / float(l1_loads)) * 100.0 if l1_loads > 0 else 0.0
-    l2_miss_rate = (l2_miss / float(l2_acc)) * 100.0 if l2_acc > 0 else 0.0
-
-    print("=== Parsed counters ===")
-    print("instructions            :", instr)
-    print("L1-dcache-loads         :", l1_loads)
-    print("L1-dcache-load-misses   :", l1_miss)
-    print("l2_cache_accesses_from_dc_misses :", l2_acc)
-    print("l2_cache_misses_from_dc_misses   :", l2_miss)
-    print("DRAM fills (local+remote):", dram_total,
-          "(local={}, remote={})".format(dram_local, dram_remote))
-    print()
-
-    print("=== Rates ===")
-    print("L1 miss rate           : {:.2f} %".format(l1_miss_rate))
-    print("L2 miss rate (on L1D misses): {:.2f} %".format(l2_miss_rate))
-    print()
-
-    print("=== MPKI (per 1K instructions) ===")
-    print("L1 MPKI                : {:.3f}".format(l1_mpki))
-    print("L2 MPKI                : {:.3f}".format(l2_mpki))
-    print("DRAM MPKI (local+remote): {:.3f}".format(dram_mpki))
-
-
 def main():
     if len(sys.argv) < 2:
-        print("Usage: {} <binary> [args ...]".format(sys.argv[0]))
+        print("Usage: {} <binary> [binary args ...]".format(sys.argv[0]),
+              file=sys.stderr)
         sys.exit(1)
 
-    cmd = sys.argv[1:]
+    binary = sys.argv[1]
+    args = sys.argv[2:]
 
-    rc, out, err = run_perf(cmd)
+    result = run_perf(binary, args)
 
+    # 生の stderr (perf の CSV 出力) をそのまま表示
     print("=== perf raw output (stderr) ===")
-    print(err.strip())
+    raw = result.stderr.strip()
+    if raw:
+        print(raw)
+    else:
+        print("(no stderr output)")
+
+    counters = parse_perf_stderr(result.stderr)
+
+    instr = counters.get("instructions", 0)
+    l1_loads = counters.get("L1-dcache-loads", 0)
+    l1_miss  = counters.get("L1-dcache-load-misses", 0)
+    l2_access_from_l1d_miss = counters.get("l2_cache_accesses_from_dc_misses", 0)
+    l2_miss  = counters.get("l2_cache_misses_from_dc_misses", 0)
+    dram_local  = counters.get("ls_refills_from_sys.ls_mabresp_lcl_dram", 0)
+    dram_remote = counters.get("ls_refills_from_sys.ls_mabresp_rmt_dram", 0)
+    dram_total  = dram_local + dram_remote
+
     print()
+    print("=== Parsed counters ===")
+    print("instructions            : {}".format(instr))
+    print("L1-dcache-loads         : {}".format(l1_loads))
+    print("L1-dcache-load-misses   : {}".format(l1_miss))
+    print("l2_cache_accesses_from_dc_misses : {}".format(l2_access_from_l1d_miss))
+    print("l2_cache_misses_from_dc_misses   : {}".format(l2_miss))
+    print("DRAM fills (local+remote): {} (local={}, remote={})"
+          .format(dram_total, dram_local, dram_remote))
 
-    counters = parse_perf_csv(err)
-    print_summary(counters)
+    # レート計算
+    print()
+    print("=== Rates ===")
+    if l1_loads > 0:
+        l1_miss_rate = 100.0 * l1_miss / l1_loads
+        print("L1 miss rate            : {:.2f} %".format(l1_miss_rate))
+    else:
+        print("L1 miss rate            : N/A (L1-dcache-loads == 0)")
 
-    # perf の終了コードはそのまま返しておく
-    sys.exit(rc)
+    if l2_access_from_l1d_miss > 0:
+        l2_miss_rate = 100.0 * l2_miss / l2_access_from_l1d_miss
+        print("L2 miss rate (on L1D misses): {:.2f} %".format(l2_miss_rate))
+    else:
+        print("L2 miss rate (on L1D misses): N/A (L2 accesses from L1D misses == 0)")
+
+    # MPKI / PKI 計算
+    print()
+    print("=== Per-1K-instruction metrics (MPKI/PKI) ===")
+    if instr == 0:
+        print("instructions is 0, cannot compute MPKI/PKI")
+        return
+
+    k = instr / 1000.0
+
+    l1_mpki = l1_miss / k
+    l2_mpki = l2_miss / k
+    dram_pki = dram_total / k   # 「ミス」ではなく DRAM フィルなので PKI と表現
+
+    print("L1 MPKI                 : {:.3f}".format(l1_mpki))
+    print("L2 MPKI                 : {:.3f}".format(l2_mpki))
+    print("DRAM fill PKI (local+remote): {:.3f}".format(dram_pki))
 
 
 if __name__ == "__main__":
