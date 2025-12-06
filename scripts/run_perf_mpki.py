@@ -8,7 +8,6 @@ import socket
 # 設定
 # ==============================
 
-# 使う perf イベント
 EVENTS = [
     "cycles",
     "instructions",
@@ -20,18 +19,21 @@ EVENTS = [
     "ls_refills_from_sys.ls_mabresp_rmt_dram",
 ]
 
-# ホスト名（ここが修正ポイント：固定文字列ではなく hostname から取得）
-NODE = socket.gethostname()  # FQDN のままで出す。短くしたければ split(".")[0]
+# 実行ノード名（FQDN のまま。短くしたければ .split('.')[0] でもよい）
+NODE = socket.gethostname()
 
 
 # ==============================
-# パーサ
+# perf stderr パース
 # ==============================
 
 def parse_perf_stderr(stderr: str):
     """
     perf stat -x, の stderr をパースして
     event_name -> count の辞書を返す。
+
+    例:
+      665505349,,cycles:u,173811319,62.35,,
     """
     counters = {}
 
@@ -39,23 +41,27 @@ def parse_perf_stderr(stderr: str):
         line = line.strip()
         if not line:
             continue
-        # perf stat -x, の行は "value, ,event,..." みたいな形式
+
         parts = line.split(",")
         if len(parts) < 3:
             continue
 
         value_str = parts[0].strip()
-        event_name = parts[2].strip()
+        event_name_raw = parts[2].strip()
 
-        # ヘッダやエラー行はスキップ
-        if not value_str or not event_name:
+        # ヘッダや空行はスキップ
+        if not value_str or not event_name_raw:
             continue
 
-        # カウントを int 変換（失敗したら無視）
+        # value が整数じゃない行（エラー行など）はスキップ
         try:
             val = int(value_str)
         except ValueError:
             continue
+
+        # ★ここが重要★
+        # cycles:u → cycles,  instructions:k → instructions みたいに正規化
+        event_name = event_name_raw.split(":")[0]
 
         counters[event_name] = val
 
@@ -85,28 +91,25 @@ def main():
     bench = args.benchmark
     bench_args = args.bench_args
 
-    # perf コマンド組み立て
     cmd = [
         "perf", "stat",
-        "-x,",                # CSV っぽく
+        "-x,",                # CSV 形式
         "-e", ",".join(EVENTS),
         "--",
         bench,
     ] + bench_args
 
-    # 実行
     proc = subprocess.run(
         cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         universal_newlines=True,
-        check=False,   # 失敗時も stderr を見たいので自前で判定
+        check=False,
     )
 
     stdout = proc.stdout
     stderr = proc.stderr
 
-    # 生の stderr をまず出す
     print("=== perf raw output (stderr) ===")
     print(stderr.strip())
     print()
@@ -114,7 +117,6 @@ def main():
     if proc.returncode != 0:
         print("perf stat exited with non-zero status:", proc.returncode, file=sys.stderr)
 
-    # パース
     counters = parse_perf_stderr(stderr)
 
     cycles        = counters.get("cycles", 0)
@@ -127,7 +129,6 @@ def main():
     dram_remote   = counters.get("ls_refills_from_sys.ls_mabresp_rmt_dram", 0)
     dram_total    = dram_local + dram_remote
 
-    # === ここからサマリ出力 ===
     print("=== Parsed counters ===")
     print("node                    : {}".format(NODE))
     print("cycles                 : {}".format(cycles))
@@ -141,7 +142,6 @@ def main():
     ))
     print()
 
-    # レート / IPC
     print("=== Rates / IPC ===")
     if l1_loads > 0:
         l1_miss_rate = 100.0 * l1_misses / l1_loads
@@ -163,7 +163,6 @@ def main():
     print("IPC                    : {:.3f}".format(ipc))
     print()
 
-    # MPKI / PKI
     print("=== Per-1K-instruction metrics (MPKI/PKI) ===")
     if instructions > 0:
         l1_mpki  = 1000.0 * l1_misses / instructions
@@ -177,7 +176,6 @@ def main():
     print("Demand DRAM fills (L1D) PKI : {:.3f}".format(dram_pki))
     print()
 
-    # ベンチ stdout も最後にそのまま吐いておきたい場合
     if stdout.strip():
         print("=== benchmark stdout ===")
         print(stdout.strip())
