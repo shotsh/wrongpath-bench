@@ -5,6 +5,7 @@ import datetime
 import subprocess
 import re
 from pathlib import Path
+import socket
 
 # 作業ディレクトリ（シンボリックリンク経由でも OK）
 ROOT = Path.cwd()
@@ -13,10 +14,16 @@ RESULT_ROOT = ROOT / "results"
 BENCH = ROOT / "benchmark"
 RUN_PERF = ROOT / "scripts" / "run_perf_mpki.py"
 
+# 実行ノード名
+HOSTNAME = socket.gethostname()
+
 RE_IPC      = re.compile(r"^IPC\s*:\s*([0-9.]+)")
 RE_L1_MPKI  = re.compile(r"^L1 MPKI\s*:\s*([0-9.]+)")
 RE_L2_MPKI  = re.compile(r"^L2 MPKI\s*:\s*([0-9.]+)")
-RE_DRAM_PKI = re.compile(r"^DRAM fill PKI .*:\s*([0-9.]+)")
+# 旧形式 / 新形式どちらも拾えるように少しゆるめる
+#   旧: "DRAM fill PKI (local+remote): 157.665"
+#   新: "Demand DRAM fills (L1D) PKI : 101.742"
+RE_DRAM_PKI = re.compile(r"DRAM.*PKI\s*:\s*([0-9.]+)")
 
 def load_cases():
     cases = {}
@@ -53,8 +60,7 @@ def build_argv_list(case):
         else:
             if seen_empty:
                 raise ValueError(
-                    "case_id={cid}: '{k}' is set but a previous optional field is empty"
-                    .format(cid=case.get("case_id"), k=k)
+                f"case_id={case.get('case_id')}: '{k}' is set but a previous optional field is empty"
                 )
 
     for raw in opt_raws:
@@ -83,28 +89,22 @@ def run_one_case(case, outdir):
 
     outdir.mkdir(parents=True, exist_ok=True)
 
-    # ★ ここでタイムスタンプ付きファイル名を作る
-    ts = datetime.datetime.now().strftime("%y%m%d%H%M%S")  # yymmddHHMMSS
-    logfile = outdir / "perf_{cid}_{ts}.txt".format(cid=case_id, ts=ts)
+    # yymmddHHMMSS 付きで上書きしないログファイル名にする
+    ts = datetime.datetime.now().strftime("%y%m%d%H%M%S")
+    logfile = outdir / f"perf_{case_id}_{ts}.txt"
 
-    # ヘッダブロック（ターミナル & ログファイル共通）
-    header_lines = [
-        "== Running case {cid} ==".format(cid=case_id),
-        "  log_file    : {name}".format(name=logfile.name),
-        "  A_bytes      : {v}".format(v=A_bytes),
-        "  B_bytes      : {v}".format(v=B_bytes),
-        "  chunk_bytes  : {v}".format(v=chunk_bytes),
-        "  access_mode  : {v}".format(v=access_mode),
-        "  stride_elems : {v}".format(v=stride_elems),
-        "  outer_scale  : {v}".format(v=outer_scale),
-    ]
+    print(f"== Running case {case_id} ==")
+    print(f"  node         : {HOSTNAME}")
+    print(f"  log_file     : {logfile.name}")
+    print(f"  A_bytes      : {A_bytes}")
+    print(f"  B_bytes      : {B_bytes}")
+    print(f"  chunk_bytes  : {chunk_bytes}")
+    print(f"  access_mode  : {access_mode}")
+    print(f"  stride_elems : {stride_elems}")
+    print(f"  outer_scale  : {outer_scale}")
     if description:
-        header_lines.append("  description  : {d}".format(d=description))
-
-    header_text = "\n".join(header_lines) + "\n"
-
-    # ターミナルに表示
-    print(header_text)
+        print(f"  description  : {description}")
+    print()
 
     cmd = ["python3", str(RUN_PERF), str(BENCH)] + [str(x) for x in argv]
 
@@ -117,13 +117,6 @@ def run_one_case(case, outdir):
     )
     stdout, stderr = proc.communicate()
 
-    # ターミナルにも perf の出力をそのまま表示
-    print("=== STDOUT (run_perf_mpki) ===")
-    print(stdout, end="")
-    print("\n=== STDERR (run_perf_mpki) ===")
-    print(stderr, end="")
-    print()
-
     if proc.returncode != 0:
         raise RuntimeError(
             "run_perf failed for case {cid} with code {code}\ncmd: {cmd}\nstderr:\n{stderr}".format(
@@ -131,10 +124,30 @@ def run_one_case(case, outdir):
             )
         )
 
-    # 生ログをファイルに保存（ヘッダ → CMD → STDOUT → STDERR の順）
+    # ターミナルにも perf のまとめをそのまま出す
+    print("=== STDOUT (run_perf_mpki) ===")
+    print(stdout)
+    print("\n=== STDERR (run_perf_mpki) ===")
+    print(stderr)
+    print()
+
+    # ログファイルの先頭に実行条件も書き込む
+    header_lines = [
+        f"== Running case {case_id} ==",
+        f"  node         : {HOSTNAME}",
+        f"  A_bytes      : {A_bytes}",
+        f"  B_bytes      : {B_bytes}",
+        f"  chunk_bytes  : {chunk_bytes}",
+        f"  access_mode  : {access_mode}",
+        f"  stride_elems : {stride_elems}",
+        f"  outer_scale  : {outer_scale}",
+    ]
+    if description:
+        header_lines.append(f"  description  : {description}")
+
     with open(logfile, "w") as f:
-        f.write(header_text)
-        f.write("\n=== CMD ===\n")
+        f.write("\n".join(header_lines))
+        f.write("\n\n=== CMD ===\n")
         f.write(" ".join(cmd) + "\n\n")
         f.write("=== STDOUT ===\n")
         f.write(stdout)
@@ -163,17 +176,10 @@ def run_one_case(case, outdir):
 
     if ipc is None or l1_mpki is None or l2_mpki is None or dram_pki is None:
         print("Warning: failed to parse some metrics for {cid}".format(cid=case_id))
-    else:
-        print(
-            "  ==> Parsed summary: IPC={:.3f}, L1_MPKI={:.3f}, "
-            "L2_MPKI={:.3f}, DRAM_PKI={:.3f}".format(
-                ipc, l1_mpki, l2_mpki, dram_pki
-            )
-        )
-    print()
 
     return {
         "case_id": case_id,
+        "node": HOSTNAME,
         "A_bytes": A_bytes,
         "B_bytes": B_bytes,
         "chunk_bytes": chunk_bytes,
@@ -230,6 +236,7 @@ def main():
         write_header = not summary_path.exists()
         fieldnames = [
             "case_id",
+            "node",  # どのマシンで取ったか
             "A_bytes", "B_bytes", "chunk_bytes",
             "access_mode", "stride_elems", "outer_scale",
             "IPC", "L1_MPKI", "L2_MPKI", "DRAM_PKI",
@@ -242,6 +249,7 @@ def main():
             for r in summary_rows:
                 writer.writerow(r)
 
+        print()
         print("Wrote summary to {path}".format(path=summary_path))
 
 if __name__ == "__main__":
