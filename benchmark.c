@@ -3,6 +3,10 @@
 #include <stdlib.h>
 #include <stdint.h>
 
+#ifdef TRACE_MODE
+#warning "Compiling with TRACE_MODE: B array is NOT initialized (trace only build)"
+#endif
+
 static volatile double sink = 0.0;
 
 static void init_array(double *p, size_t n, double base)
@@ -38,8 +42,8 @@ static double run_kernel(double *A, double *B,
         size_t base = outer * elems_per_iter * stride_elems;
 
         // Always loop exactly elems_per_iter times
-        // dense:  stride=1  → B[base + 0,1,2,...]
-        // stride: stride=8 → B[base + 0,8,16,...]
+        // dense:  stride=1  -> B[base + 0,1,2,...]
+        // stride: stride=8 -> B[base + 0,8,16,...]
         for (size_t j = 0; j < elems_per_iter; j++) {
             size_t idx = base + j * stride_elems;
             sum += B[idx];
@@ -90,9 +94,9 @@ int main(int argc, char **argv)
     // Treat dense as stride=1 (no branches inside the kernel)
     size_t stride_elems = (access_mode == 0) ? 1 : user_stride;
 
-    size_t A_elems     = A_bytes     / sizeof(double);
-    size_t B_elems     = B_bytes     / sizeof(double);
-    size_t elems_per_iter = chunk_bytes / sizeof(double);
+    size_t A_elems        = A_bytes       / sizeof(double);
+    size_t B_elems        = B_bytes       / sizeof(double);
+    size_t elems_per_iter = chunk_bytes   / sizeof(double);
 
     if (A_elems == 0 || B_elems == 0 || elems_per_iter == 0) {
         fprintf(stderr, "A_bytes, B_bytes, chunk_bytes must be >= sizeof(double)\n");
@@ -125,7 +129,7 @@ int main(int argc, char **argv)
     size_t B_elems_alloc = B_elems * user_stride;
 
     // Print configuration info
-    size_t base_outer_iters = B_elems / elems_per_iter;
+    size_t base_outer_iters  = B_elems / elems_per_iter;
     size_t total_outer_iters = base_outer_iters * outer_scale;
 
     printf("# Params:\n");
@@ -144,6 +148,10 @@ int main(int argc, char **argv)
     printf("#   total_outer_iters = %zu (base_outer_iters * outer_scale)\n",
            total_outer_iters);
 
+#ifdef TRACE_MODE
+    printf("#   TRACE_MODE: B is not initialized (values arbitrary, address pattern only)\n");
+#endif
+
     double *A = (double *)malloc(sizeof(double) * A_elems);
     double *B = (double *)malloc(sizeof(double) * B_elems_alloc);
     if (!A || !B) {
@@ -153,8 +161,14 @@ int main(int argc, char **argv)
         return 1;
     }
 
+#ifndef TRACE_MODE
+    // Normal build: initialize both A and B for correct numeric behavior and perf experiments
     init_array(A, A_elems, 1.0);
     init_array(B, B_elems_alloc, 1000.0);
+#else
+    // TRACE_MODE build: initialize only A. B is left uninitialized to avoid large init overhead.
+    init_array(A, A_elems, 1.0);
+#endif
 
     double sum = 0.0;
 

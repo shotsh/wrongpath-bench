@@ -1,22 +1,25 @@
-CC     = gcc
-CFLAGS = -O3 -Wall -Wextra -std=c11
+# Makefile for wrongpath-bench
 
-SRC = benchmark.c
+CC      ?= gcc
+CFLAGS  ?= -O3 -march=native -Wall
+SRC     = benchmark.c
 
-# デフォルト: 両方ビルド
-all: benchmark_dense benchmark_stride
+.PHONY: all perf trace clean
 
-# 密アクセス版 (ACCESS_MODE=0)
-benchmark_dense: $(SRC)
-	$(CC) $(CFLAGS) -DACCESS_MODE=0 -o $@ $<
+# デフォルトは両方ビルド
+all: benchmark benchmark_trace
 
-# ストライド版 (ACCESS_MODE=1)
-# STRIDE は要素数単位のストライド長として上書き可能:
-#   make benchmark_stride STRIDE=16
-STRIDE ?= 8
+# 実機 perf 用バイナリ
+perf: benchmark
 
-benchmark_stride: $(SRC)
-	$(CC) $(CFLAGS) -DACCESS_MODE=1 -DSTRIDE_ELEMS=$(STRIDE) -o $@ $<
+benchmark: $(SRC)
+	$(CC) $(CFLAGS) -o $@ $<
+
+# ChampSim トレース用バイナリ (TRACE_MODE 有効, B の init カット)
+trace: benchmark_trace
+
+benchmark_trace: $(SRC)
+	$(CC) $(CFLAGS) -DTRACE_MODE -o $@ $<
 
 clean:
-	rm -f benchmark_dense benchmark_stride
+	rm -f benchmark benchmark_trace
