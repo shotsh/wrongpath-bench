@@ -11,7 +11,7 @@ import socket
 ROOT = Path.cwd()
 CONFIG_PATH = ROOT / "configs" / "cases.csv"
 RESULT_ROOT = ROOT / "results"
-BENCH = ROOT / "benchmark"
+BENCH_DEFAULT = ROOT / "benchmark"  # デフォルトのバイナリ
 RUN_PERF = ROOT / "scripts" / "run_perf_mpki.py"
 
 # 実行ノード名
@@ -21,8 +21,6 @@ RE_IPC      = re.compile(r"^IPC\s*:\s*([0-9.]+)")
 RE_L1_MPKI  = re.compile(r"^L1 MPKI\s*:\s*([0-9.]+)")
 RE_L2_MPKI  = re.compile(r"^L2 MPKI\s*:\s*([0-9.]+)")
 # 旧形式 / 新形式どちらも拾えるように少しゆるめる
-#   旧: "DRAM fill PKI (local+remote): 157.665"
-#   新: "Demand DRAM fills (L1D) PKI : 101.742"
 RE_DRAM_PKI = re.compile(r"DRAM.*PKI\s*:\s*([0-9.]+)")
 
 def load_cases():
@@ -72,7 +70,7 @@ def build_argv_list(case):
 
     return args
 
-def run_one_case(case, outdir):
+def run_one_case(case, outdir, bench_path: Path):
     """1ケース分実行して、生ログとサマリ行を返す。"""
     case_id = case["case_id"]
     description = (case.get("description") or "").strip()  # あってもなくてもOK
@@ -96,6 +94,7 @@ def run_one_case(case, outdir):
     print(f"== Running case {case_id} ==")
     print(f"  node         : {HOSTNAME}")
     print(f"  log_file     : {logfile.name}")
+    print(f"  binary       : {bench_path}")
     print(f"  A_bytes      : {A_bytes}")
     print(f"  B_bytes      : {B_bytes}")
     print(f"  chunk_bytes  : {chunk_bytes}")
@@ -106,7 +105,7 @@ def run_one_case(case, outdir):
         print(f"  description  : {description}")
     print()
 
-    cmd = ["python3", str(RUN_PERF), str(BENCH)] + [str(x) for x in argv]
+    cmd = ["python3", str(RUN_PERF), str(bench_path)] + [str(x) for x in argv]
 
     # Python 3.6 対応の subprocess
     proc = subprocess.Popen(
@@ -127,7 +126,7 @@ def run_one_case(case, outdir):
     # ターミナルにも perf のまとめをそのまま出す
     print("=== STDOUT (run_perf_mpki) ===")
     print(stdout)
-    print("\n=== STDERR (run_perf_mpki) ===")
+    print("\n=== STDERR ===")
     print(stderr)
     print()
 
@@ -135,6 +134,7 @@ def run_one_case(case, outdir):
     header_lines = [
         f"== Running case {case_id} ==",
         f"  node         : {HOSTNAME}",
+        f"  binary       : {bench_path}",
         f"  A_bytes      : {A_bytes}",
         f"  B_bytes      : {B_bytes}",
         f"  chunk_bytes  : {chunk_bytes}",
@@ -205,6 +205,11 @@ def main():
         action="store_true",
         help="run all cases in configs/cases.csv",
     )
+    parser.add_argument(
+        "--binary",
+        default=str(BENCH_DEFAULT),
+        help="path to benchmark binary (default: ./benchmark)",
+    )
     args = parser.parse_args()
 
     cases = load_cases()
@@ -215,6 +220,8 @@ def main():
         target_ids = args.case
     else:
         parser.error("either --all or --case must be specified")
+
+    bench_path = Path(args.binary)
 
     date_str = datetime.datetime.now().strftime("%Y%m%d")
     outdir = RESULT_ROOT / date_str
@@ -229,7 +236,7 @@ def main():
                 cid=cid, cfg=CONFIG_PATH
             ))
             continue
-        row = run_one_case(cases[cid], outdir)
+        row = run_one_case(cases[cid], outdir, bench_path)
         summary_rows.append(row)
 
     if summary_rows:
