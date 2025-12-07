@@ -11,8 +11,8 @@ import socket
 ROOT = Path.cwd()
 CONFIG_PATH = ROOT / "configs" / "cases.csv"
 RESULT_ROOT = ROOT / "results"
-BENCH_DEFAULT = ROOT / "benchmark"  # デフォルトのバイナリ
-RUN_PERF = ROOT / "scripts" / "run_perf_mpki.py"
+BENCH_DEFAULT = (ROOT / "benchmark").resolve()  # デフォルトのバイナリ
+RUN_PERF = (ROOT / "scripts" / "run_perf_mpki.py").resolve()
 
 # 実行ノード名
 HOSTNAME = socket.gethostname()
@@ -21,7 +21,10 @@ RE_IPC      = re.compile(r"^IPC\s*:\s*([0-9.]+)")
 RE_L1_MPKI  = re.compile(r"^L1 MPKI\s*:\s*([0-9.]+)")
 RE_L2_MPKI  = re.compile(r"^L2 MPKI\s*:\s*([0-9.]+)")
 # 旧形式 / 新形式どちらも拾えるように少しゆるめる
+#   旧: "DRAM fill PKI (local+remote): 157.665"
+#   新: "Demand DRAM fills (L1D) PKI : 101.742"
 RE_DRAM_PKI = re.compile(r"DRAM.*PKI\s*:\s*([0-9.]+)")
+
 
 def load_cases():
     cases = {}
@@ -30,6 +33,7 @@ def load_cases():
         for row in reader:
             cases[row["case_id"]] = row
     return cases
+
 
 def build_argv_list(case):
     """
@@ -58,7 +62,7 @@ def build_argv_list(case):
         else:
             if seen_empty:
                 raise ValueError(
-                f"case_id={case.get('case_id')}: '{k}' is set but a previous optional field is empty"
+                    f"case_id={case.get('case_id')}: '{k}' is set but a previous optional field is empty"
                 )
 
     for raw in opt_raws:
@@ -69,6 +73,7 @@ def build_argv_list(case):
             break
 
     return args
+
 
 def run_one_case(case, outdir, bench_path: Path):
     """1ケース分実行して、生ログとサマリ行を返す。"""
@@ -126,7 +131,7 @@ def run_one_case(case, outdir, bench_path: Path):
     # ターミナルにも perf のまとめをそのまま出す
     print("=== STDOUT (run_perf_mpki) ===")
     print(stdout)
-    print("\n=== STDERR ===")
+    print("\n=== STDERR (run_perf_mpki) ===")
     print(stderr)
     print()
 
@@ -193,6 +198,7 @@ def run_one_case(case, outdir, bench_path: Path):
         "description": description,  # サマリでは最後の列
     }
 
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -221,7 +227,8 @@ def main():
     else:
         parser.error("either --all or --case must be specified")
 
-    bench_path = Path(args.binary)
+    # ベンチバイナリは絶対パスに解決して perf に渡す
+    bench_path = Path(args.binary).resolve()
 
     date_str = datetime.datetime.now().strftime("%Y%m%d")
     outdir = RESULT_ROOT / date_str
@@ -258,6 +265,7 @@ def main():
 
         print()
         print("Wrote summary to {path}".format(path=summary_path))
+
 
 if __name__ == "__main__":
     main()
