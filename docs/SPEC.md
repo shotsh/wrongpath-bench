@@ -26,7 +26,7 @@
 
 を分けて、段階的に進める。
 
-言語は、Sho が慣れている **C と Python をメインターゲット**とする。  
+言語は、Sho が慣れている **Cをメインターゲット**とする。  
 （内部実装で C++ を使うのはアリだが、必須ではない）
 
 ---
@@ -65,7 +65,7 @@
   「A のアクセス」「B のアクセス」がそれっぽいアドレスに見えていると自信を持てること。
 
 **ツール案**  
-`tools/trace_inspect.py` または `tools/trace_inspect.c`
+ `tools/trace_inspect.c`
 
 #### 入力
 
@@ -99,7 +99,6 @@ idx=12346 ip=0x400ac0 src_mem=[0x7f2000001008] dst_mem=[]
 * ファイルを開いて、`sizeof(input_instr)` バイトずつ順に読み取る
 * C なら
   `struct input_instr rec; fread(&rec, sizeof(rec), 1, fp);`
-* Python なら `struct` モジュールを使って固定長レコードとして読む
 * ここでは「全フィールドを完璧に表示する」ことは目的ではなく、
   **メモリアクセスのアドレスがそれっぽく見えていることを確認できれば OK**
 
@@ -119,7 +118,7 @@ idx=12346 ip=0x400ac0 src_mem=[0x7f2000001008] dst_mem=[]
     という感覚を掴めること。
 
 **ツール案**
-`tools/find_b_accesses.py` など
+`tools/find_b_accesses.c` など
 
 #### 入力
 
@@ -197,7 +196,7 @@ idx,kind,ip,addr
     という形を試す
 
 **ツール案**
-`tools/trace_overwrite_range.py` または C 版
+`tools/trace_overwrite_range.c`
 
 #### 入力
 
