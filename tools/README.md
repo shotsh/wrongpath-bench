@@ -430,3 +430,98 @@ echo "推定 outer iterations: $((A_COUNT / 8192))"
 
 **注意:** この上書きは一次近似であり、本来の wrong-path 動作とは異なる。
 キャッシュウォーミング効果の簡易検証が目的。
+
+### trace_insert_range (Phase 3.5)
+
+トレースの指定範囲を別の位置に「挿入」する。上書きモードと異なり、元のレコードはすべて保持され、トレース長が増加する。
+
+```bash
+# 使い方
+./trace_insert_range --in <INPUT> --out <OUTPUT> \
+    --src-begin I --src-end J --insert-at K [--dry-run]
+
+# 例: Aの真ん中 (idx=336480) にBの先頭14340レコードを挿入
+./trace_insert_range \
+    --in ../wp_A64KB_B64MB_chunk32KB_stride16_os2 \
+    --out ../results/wp_inserted.trace \
+    --src-begin 350820 --src-end 365160 --insert-at 336480
+
+# 例: dry-run で範囲検証とインデックスマッピング確認
+./trace_insert_range \
+    --in ../wp_A64KB_B64MB_chunk32KB_stride16_os2 \
+    --src-begin 350820 --src-end 365160 --insert-at 336480 \
+    --dry-run
+```
+
+#### オプション
+
+| オプション | 説明 |
+|-----------|------|
+| `--in PATH` | 入力トレースファイル (必須) |
+| `--out PATH` | 出力トレースファイル (必須、`--dry-run` 時は不要) |
+| `--src-begin I` | コピー元の開始インデックス (含む、必須) |
+| `--src-end J` | コピー元の終了インデックス (含まない、必須) |
+| `--insert-at K` | 挿入位置 (このインデックスの直前に挿入、必須) |
+| `--dry-run` | 範囲検証のみ、出力ファイルを作成しない |
+
+#### 動作
+
+1. src範囲 `[src_begin, src_end)` をメモリに読み込む
+2. トレースを先頭から順に読み込む
+3. `idx == insert_at` に達したら:
+   - src範囲のレコードを出力（挿入）
+   - 元のレコードも出力
+4. 出力トレースの総レコード数 = 入力 + (src_end - src_begin)
+
+#### 出力インデックスのマッピング
+
+```
+入力: [0, ..., insert_at-1, insert_at, ..., total-1]
+出力: [0, ..., insert_at-1, INSERTED..., insert_at+len, ..., total+len-1]
+                            ^^^^^^^^^^
+                            挿入された部分
+```
+
+#### 検証方法
+
+```bash
+# ファイルサイズで挿入を確認
+ls -l original.trace inserted.trace
+# 差分 = 挿入レコード数 × 64 bytes
+
+# 挿入位置の内容を確認
+./trace_inspect --trace inserted.trace --start 336478 --max 5
+# idx=336478, 336479: 元のAアクセス
+# idx=336480~: 挿入されたBアクセス
+
+# 元のレコードがシフトしていることを確認
+./trace_inspect --trace inserted.trace --start $((336480 + 14340)) --max 3
+# 元の336480のレコードが表示される
+```
+
+#### 典型的なユースケース
+
+**Bチャンクの先読み効果を検証（挿入モード）:**
+
+```bash
+# Aの真ん中にBの先頭部分を挿入（Aの後半と同じ長さ）
+# A sweep: idx=322141 ~ 350819 (28679 records)
+# A真ん中: idx=336480
+# A後半長さ: 14340 records
+
+./trace_insert_range \
+    --in ../wp_A64KB_B64MB_chunk32KB_stride16_os2 \
+    --out ../results/wp_inserted_A_mid_B.trace \
+    --src-begin 350820 --src-end 365160 \
+    --insert-at 336480
+```
+
+**挿入後のトレース構造:**
+```
+元:   [A sweep (全体)] → [B chunk]
+挿入: [A前半] → [B挿入] → [A後半] → [B chunk]
+```
+
+**上書きモードとの違い:**
+- 上書き: 元のレコードが消える、トレース長は変わらない
+- 挿入: 元のレコードはすべて保持、トレース長が増加
