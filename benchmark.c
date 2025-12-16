@@ -217,6 +217,11 @@ int main(int argc, char **argv)
     init_array(A, A_elems, 1.0);
 #endif
 
+    // Print pointer values for trace analysis (Phase 2: find_b_accesses)
+    BENCH_PRINTF("#   A=%p\n", (void*)A);
+    BENCH_PRINTF("#   B=%p\n", (void*)B);
+    BENCH_PRINTF("#   B_alloc_bytes = %zu\n", sizeof(double) * B_elems_alloc);
+
     double sum = 0.0;
 
     // Repeat the same kernel outer_scale times.
