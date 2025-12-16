@@ -4,6 +4,7 @@
 
 | 日付 | バージョン | 変更内容 |
 |------|-----------|----------|
+| 2025-12-16 | 1.5 | Phase 4 実装検証結果を反映: ループオーバーヘッド(11命令)の発見、正しいパラメータ値(b_len=20487, b_ratio=0.9995)を追記 |
 | 2025-12-16 | 1.4 | Phase 4 (trace_insert_all_iters) 仕様追加: 全イテレーションへの一括挿入 |
 | 2025-12-16 | 1.3 | Phase 3.6 (trace_insert_b_at_a) 仕様追加: Aの位置とB挿入量をパラメータで指定 |
 | 2025-12-16 | 1.2 | Phase 3.5 (trace_insert_range) 仕様追加 |
@@ -566,6 +567,39 @@ src_begin[i] = b_begin[i]
 src_end[i] = b_begin[i] + b_insert_len
 ```
 
+### 重要: トレース構造とパラメータの正確な値
+
+実装検証により、トレース構造には**ループオーバーヘッド**が存在することが判明した。
+
+**発見した事実:**
+- B の最後のロードアクセス (IP=0x4008b3) の後、次の A の最初のロードアクセス (IP=0x400880) までに **11命令** のオーバーヘッドがある
+- この11命令はループ制御やインクリメント命令
+
+**正しいパラメータ値 (wp_A64KB_B64MB_chunk32KB_stride16_os2 の場合):**
+
+| パラメータ | 値 | 説明 |
+|-----------|-----|------|
+| a_len | 28679 | A sweep のレコード数 |
+| b_len | **20487** | B chunk のレコード数 (実Bアクセス 20476 + オーバーヘッド 11) |
+| iter_len | **49166** | 1イテレーションの長さ (28679 + 20487) |
+| b_ratio | **0.9995** | 実際のBアクセスのみを挿入する場合 (20476 / 20487) |
+
+**誤りやすいポイント:**
+- `find_b_accesses` で検出されるBアクセスは 20476 レコードだが、これは**実際のBロード命令のみ**
+- イテレーション間隔の計算には、ループオーバーヘッド11を含めた `b_len=20487` を使用する必要がある
+- 「Bアクセスのみ」を挿入したい場合は `b_ratio=0.9995` (= 20476/20487) を指定
+
+**検証方法:**
+```bash
+# B0 の最後とA1の最初の境界を確認
+./trace_inspect --trace ../wp_A64KB_B64MB_chunk32KB_stride16_os2 --start 371290 --max 20
+
+# 期待される出力:
+# idx=371295 ip=0x4008b3 ... ← B0 の最後のロード
+# idx=371296 〜 371306: ループオーバーヘッド (11命令)
+# idx=371307 ip=0x400880 ... ← A1 の最初のロード
+```
+
 ### 実装方針
 
 **1パス + メモリバッファ方式:**
@@ -588,17 +622,18 @@ src_end[i] = b_begin[i] + b_insert_len
 # 構造情報（事前に特定済み）
 # - 最初のA開始: idx=322141
 # - A長さ: 28679 records
-# - B長さ: 20476 records
+# - B長さ: 20487 records (実Bアクセス 20476 + ループオーバーヘッド 11)
 # - イテレーション数: 4096 (推定)
+# - 実Bアクセスのみ挿入する場合: b_ratio=0.9995 (= 20476/20487)
 
 # ケース1: 8回に1回だけ挿入（間引きモード、推奨の開始点）
 ./trace_insert_all_iters \
     --in ../wp_A64KB_B64MB_chunk32KB_stride16_os2 \
     --out ../results/wp_every8_a0.5_b1.0.trace \
     --first-a-begin 322141 \
-    --a-len 28679 --b-len 20476 \
+    --a-len 28679 --b-len 20487 \
     --iterations 4096 \
-    --a-pos 0.5 --b-ratio 1.0 \
+    --a-pos 0.5 --b-ratio 0.9995 \
     --every 8
 
 # ケース2: 全イテレーションで挿入（--every 1 または省略）
@@ -606,9 +641,9 @@ src_end[i] = b_begin[i] + b_insert_len
     --in ../wp_A64KB_B64MB_chunk32KB_stride16_os2 \
     --out ../results/wp_all_iters_a0.5_b1.0.trace \
     --first-a-begin 322141 \
-    --a-len 28679 --b-len 20476 \
+    --a-len 28679 --b-len 20487 \
     --iterations 4096 \
-    --a-pos 0.5 --b-ratio 1.0
+    --a-pos 0.5 --b-ratio 0.9995
 
 # ケース3: 間引き率を変えたパラメータスイープ
 for every in 1 2 4 8 16; do
@@ -616,21 +651,22 @@ for every in 1 2 4 8 16; do
         --in ../wp_trace \
         --out ../results/sweep_every${every}.trace \
         --first-a-begin 322141 \
-        --a-len 28679 --b-len 20476 \
+        --a-len 28679 --b-len 20487 \
         --iterations 4096 \
-        --a-pos 0.5 --b-ratio 1.0 \
+        --a-pos 0.5 --b-ratio 0.9995 \
         --every $every
 done
 
 # ケース4: a_pos, b_ratio, every の3次元スイープ
+# 注: b_ratio はループオーバーヘッドを考慮した値を使用
 for a_pos in 0.0 0.5 1.0; do
-    for b_ratio in 0.5 1.0; do
+    for b_ratio in 0.5 0.9995; do
         for every in 1 8; do
             ./trace_insert_all_iters \
                 --in ../wp_trace \
                 --out ../results/sweep_a${a_pos}_b${b_ratio}_e${every}.trace \
                 --first-a-begin 322141 \
-                --a-len 28679 --b-len 20476 \
+                --a-len 28679 --b-len 20487 \
                 --iterations 4096 \
                 --a-pos $a_pos --b-ratio $b_ratio \
                 --every $every
@@ -646,10 +682,10 @@ done
 # Total input records: 201707970
 # Structure:
 #   first_a_begin = 322141
-#   a_len = 28679, b_len = 20476
-#   iter_len = 49155
+#   a_len = 28679, b_len = 20487 (includes loop overhead)
+#   iter_len = 49166
 #   iterations = 4096
-# Parameters: a_pos=0.5, b_ratio=1.0, every=8
+# Parameters: a_pos=0.5, b_ratio=0.9995, every=8
 # Per-iteration insert: 20476 records at A+14339
 # Active iterations: 512 (every 8th of 4096)
 # Total insertions: 512 × 20476 = 10,483,712 records
@@ -673,6 +709,7 @@ done
 
 ```bash
 # 1. ファイルサイズ確認
+# b_ratio=0.9995 の場合、挿入されるのは 20476 records/iter
 expected_size=$((201707970 + 4096 * 20476))
 actual_size=$(($(stat -c%s output.trace) / 64))
 echo "Expected: $expected_size, Actual: $actual_size"
@@ -682,11 +719,11 @@ echo "Expected: $expected_size, Actual: $actual_size"
 # idx=336480 から B アクセス (IP=0x4008b3) が見えるはず
 
 # 3. 2番目のイテレーションの挿入を確認
-# 元の2番目のA開始: 322141 + 49155 = 371296
+# 元の2番目のA開始: 322141 + 49166 = 371307 (iter_len=49166)
 # 挿入によるシフト: +20476
-# 新しい2番目のA開始: 371296 + 20476 = 391772
-# 2番目の挿入位置: 391772 + 14339 = 406111
-./trace_inspect --trace output.trace --start 406109 --max 5
+# 新しい2番目のA開始: 371307 + 20476 = 391783
+# 2番目の挿入位置: 391783 + 14339 = 406122
+./trace_inspect --trace output.trace --start 406120 --max 5
 ```
 
 ### 制約事項
