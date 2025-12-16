@@ -4,6 +4,7 @@
 
 | 日付 | バージョン | 変更内容 |
 |------|-----------|----------|
+| 2025-12-16 | 1.4 | Phase 4 (trace_insert_all_iters) 仕様追加: 全イテレーションへの一括挿入 |
 | 2025-12-16 | 1.3 | Phase 3.6 (trace_insert_b_at_a) 仕様追加: Aの位置とB挿入量をパラメータで指定 |
 | 2025-12-16 | 1.2 | Phase 3.5 (trace_insert_range) 仕様追加 |
 | 2025-12-15 | 1.1 | Phase 3 (trace_overwrite_range) 仕様追加、配列A特定セクション追加 |
@@ -497,31 +498,231 @@ done
 ### 制約事項
 
 * 単一のAスイープ、単一のBチャンクに対する単一挿入のみ対応
-* 複数 outer iteration への一括挿入は将来の Phase 4 で対応予定
+* 複数 outer iteration への一括挿入は Phase 4 で対応
 
 ---
 
-## 4. 将来的な方向性メモ（まだやらなくて良いが、意識だけしておく）
+## 4. フェーズ4: 全イテレーション一括挿入 (trace_insert_all_iters)
 
-この SPEC は「ステップ1〜3.5」をやるための最小バージョン。
+**目的**
+Phase 3.6 の単一挿入を、全 outer iteration に対して一括で適用する。
+各イテレーションで同じパラメータ (a_pos, b_ratio) を使用し、
+「全ループで同じタイミング・同じ量の先読みを行う」効果を検証する。
+
+**設計思想**
+
+1. **パラメータの再利用**: Phase 3.6 と同じ `a_pos`, `b_ratio` を使用
+2. **構造の規則性を活用**: マイクロベンチは A/B の長さが全イテレーションで固定
+3. **1パス処理**: 挿入位置を事前計算し、トレースを1回読みながら全挿入を実行
+
+**ツール**
+`tools/trace_insert_all_iters.c`
+
+### 入力
+
+* `--in PATH_IN`
+  元のバイナリトレース
+* `--out PATH_OUT`
+  挿入後のバイナリトレース
+* `--first-a-begin IDX`
+  最初の A スイープの開始インデックス
+* `--a-len N`
+  各 A スイープのレコード数（全イテレーションで固定）
+* `--b-len N`
+  各 B チャンクのレコード数（全イテレーションで固定）
+* `--iterations N`
+  outer iteration の総数
+* `--a-pos RATIO`
+  各 A スイープ内の挿入位置（0.0〜1.0）
+* `--b-ratio RATIO`
+  各 B チャンクの挿入割合（0.0〜1.0）
+* オプション
+  * `--every N`
+    N イテレーションに1回だけ挿入（デフォルト: 1 = 毎回挿入）
+    - `--every 1`: 全イテレーションに挿入
+    - `--every 8`: 8回に1回（iter 0, 8, 16, ... に挿入）
+    - `--every 0`: 挿入しない（検証用）
+  * `--dry-run`
+    出力せず計算結果のみ表示
+
+### 内部計算
+
+各イテレーション i (0 <= i < iterations) について:
+
+```
+iter_len = a_len + b_len
+a_begin[i] = first_a_begin + i * iter_len
+a_end[i] = a_begin[i] + a_len
+b_begin[i] = a_end[i]
+b_end[i] = b_begin[i] + b_len
+
+# 挿入するかどうかの判定（--every オプション）
+if (every == 0 || i % every != 0):
+    skip this iteration
+
+insert_at[i] = a_begin[i] + (int)(a_len * a_pos)
+b_insert_len = (int)(b_len * b_ratio)
+src_begin[i] = b_begin[i]
+src_end[i] = b_begin[i] + b_insert_len
+```
+
+### 実装方針
+
+**1パス + メモリバッファ方式:**
+
+1. 全挿入位置を事前計算し、`insert_at[]` 配列を作成
+2. 元トレースを先頭から順に読みながら:
+   - 次の挿入位置に達したら:
+     - 対応する B チャンクを seek して読み込み
+     - 挿入レコードを出力
+     - 元の位置に戻って続行
+   - それ以外は元レコードをそのまま出力
+
+**計算量**: O(入力レコード数 + 挿入総レコード数) ≈ O(N)
+
+**メモリ使用量**: 1イテレーション分の B 挿入レコード (b_len × b_ratio × 64 bytes)
+
+### 典型的な使用例
+
+```bash
+# 構造情報（事前に特定済み）
+# - 最初のA開始: idx=322141
+# - A長さ: 28679 records
+# - B長さ: 20476 records
+# - イテレーション数: 4096 (推定)
+
+# ケース1: 8回に1回だけ挿入（間引きモード、推奨の開始点）
+./trace_insert_all_iters \
+    --in ../wp_A64KB_B64MB_chunk32KB_stride16_os2 \
+    --out ../results/wp_every8_a0.5_b1.0.trace \
+    --first-a-begin 322141 \
+    --a-len 28679 --b-len 20476 \
+    --iterations 4096 \
+    --a-pos 0.5 --b-ratio 1.0 \
+    --every 8
+
+# ケース2: 全イテレーションで挿入（--every 1 または省略）
+./trace_insert_all_iters \
+    --in ../wp_A64KB_B64MB_chunk32KB_stride16_os2 \
+    --out ../results/wp_all_iters_a0.5_b1.0.trace \
+    --first-a-begin 322141 \
+    --a-len 28679 --b-len 20476 \
+    --iterations 4096 \
+    --a-pos 0.5 --b-ratio 1.0
+
+# ケース3: 間引き率を変えたパラメータスイープ
+for every in 1 2 4 8 16; do
+    ./trace_insert_all_iters \
+        --in ../wp_trace \
+        --out ../results/sweep_every${every}.trace \
+        --first-a-begin 322141 \
+        --a-len 28679 --b-len 20476 \
+        --iterations 4096 \
+        --a-pos 0.5 --b-ratio 1.0 \
+        --every $every
+done
+
+# ケース4: a_pos, b_ratio, every の3次元スイープ
+for a_pos in 0.0 0.5 1.0; do
+    for b_ratio in 0.5 1.0; do
+        for every in 1 8; do
+            ./trace_insert_all_iters \
+                --in ../wp_trace \
+                --out ../results/sweep_a${a_pos}_b${b_ratio}_e${every}.trace \
+                --first-a-begin 322141 \
+                --a-len 28679 --b-len 20476 \
+                --iterations 4096 \
+                --a-pos $a_pos --b-ratio $b_ratio \
+                --every $every
+        done
+    done
+done
+```
+
+### 出力情報
+
+```
+# Input: ../wp_A64KB_B64MB_chunk32KB_stride16_os2
+# Total input records: 201707970
+# Structure:
+#   first_a_begin = 322141
+#   a_len = 28679, b_len = 20476
+#   iter_len = 49155
+#   iterations = 4096
+# Parameters: a_pos=0.5, b_ratio=1.0, every=8
+# Per-iteration insert: 20476 records at A+14339
+# Active iterations: 512 (every 8th of 4096)
+# Total insertions: 512 × 20476 = 10,483,712 records
+# Output records: 201707970 + 10483712 = 212,191,682
+```
+
+### 出力トレースの構造
+
+```
+元:
+[A0] → [B0] → [A1] → [B1] → ... → [A_N-1] → [B_N-1]
+
+挿入後 (a_pos=0.5, b_ratio=1.0):
+[A0前半] → [B0コピー] → [A0後半] → [B0] →
+[A1前半] → [B1コピー] → [A1後半] → [B1] →
+... →
+[A_N-1前半] → [B_N-1コピー] → [A_N-1後半] → [B_N-1]
+```
+
+### 検証方法
+
+```bash
+# 1. ファイルサイズ確認
+expected_size=$((201707970 + 4096 * 20476))
+actual_size=$(($(stat -c%s output.trace) / 64))
+echo "Expected: $expected_size, Actual: $actual_size"
+
+# 2. 最初のイテレーションの挿入を確認
+./trace_inspect --trace output.trace --start 336478 --max 5
+# idx=336480 から B アクセス (IP=0x4008b3) が見えるはず
+
+# 3. 2番目のイテレーションの挿入を確認
+# 元の2番目のA開始: 322141 + 49155 = 371296
+# 挿入によるシフト: +20476
+# 新しい2番目のA開始: 371296 + 20476 = 391772
+# 2番目の挿入位置: 391772 + 14339 = 406111
+./trace_inspect --trace output.trace --start 406109 --max 5
+```
+
+### 制約事項
+
+* 全イテレーションで A/B の長さが固定であることを前提
+* イテレーション数は呼び出し側で指定（自動検出は将来課題）
+* 大規模トレースでは出力ファイルサイズに注意（元の1.4倍程度になりうる）
+
+### 段階的な検証（推奨順序）
+
+いきなり全イテレーション (4096回) をやる前に、以下の順序で検証することを推奨:
+
+1. **Phase 3.6 で単一挿入**: 1イテレーションだけで動作確認
+2. **間引きモード**: `--every 8` や `--every 16` で間引いて効果の方向性を確認
+3. **全イテレーション**: `--every 1` で本番実行
+
+間引きモードで「効く方向かどうか」の感触が出れば、全イテレーションは確認用で十分な場合が多い。
+
+---
+
+## 5. 将来的な方向性メモ（まだやらなくて良いが、意識だけしておく）
+
+この SPEC は「ステップ1〜4」をやるための最小バージョン。
 余裕が出てきたら次を検討する。
 
-1. **複数挿入モードの実装**
-
-   * 編集計画ファイル（JSON）に基づいて複数の挿入を1パスで処理
-   * 全 outer iteration への挿入などに対応
-
-2. **小さい切り出しトレースの生成**
+1. **小さい切り出しトレースの生成**
 
    * `trace_slice --begin --end` のようなツールで対象範囲だけ抜き出し
    * フェーズ1〜3を軽く回す（デバッグ速度を上げる）
 
-3. **ループ検出の自動化**
+2. **ループ検出の自動化**
 
    * 今は人間が B チャンク範囲を指定する前提
    * 将来は IP の繰り返しやアドレスストライドで自動同定
 
-4. **ChampSim ランとの統合**
+3. **ChampSim ランとの統合**
 
    * 改造前後トレースを自動で
 
@@ -530,12 +731,12 @@ done
      * IPC/MPKI 集計
    * を `scripts/` にまとめる
 
-5. **マイクロアーキとの橋渡し**
+4. **マイクロアーキとの橋渡し**
 
    * trace surgery の結果から
 
      * 「どれだけ前倒しできればどれだけ効くか」
    * の目安を作り、wrong-path 機構の設計に繋げる
 
-当面は、フェーズ1〜3を **Cで自力で触れるレベルに落とすこと**を最優先とする。
+当面は、フェーズ1〜4を **Cで自力で触れるレベルに落とすこと**を最優先とする。
 

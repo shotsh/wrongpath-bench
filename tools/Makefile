@@ -3,7 +3,7 @@
 CC ?= gcc
 CFLAGS = -O2 -Wall -Wextra -std=c99
 
-TOOLS = trace_inspect find_b_accesses trace_overwrite_range trace_insert_range trace_insert_b_at_a
+TOOLS = trace_inspect find_b_accesses trace_overwrite_range trace_insert_range trace_insert_b_at_a trace_insert_all_iters
 
 .PHONY: all clean
 
@@ -22,6 +22,9 @@ trace_insert_range: trace_insert_range.c
 	$(CC) $(CFLAGS) -o $@ $<
 
 trace_insert_b_at_a: trace_insert_b_at_a.c
+	$(CC) $(CFLAGS) -o $@ $<
+
+trace_insert_all_iters: trace_insert_all_iters.c
 	$(CC) $(CFLAGS) -o $@ $<
 
 clean:
