@@ -229,6 +229,130 @@ cut -d',' -f3 b_accesses.csv | sort | uniq -c | sort -rn | head -5
 4008e1: vmovsd %xmm2,0x201787(%rip)  # ループ終了後、sinkにstore (1回のみ)
 ```
 
+## 配列Aアクセスの特定
+
+配列Bだけでなく、配列Aのアクセスも特定する必要がある場合の手順。
+
+### カーネル構造
+
+`benchmark.c` の `run_kernel` 関数は以下の構造を持つ:
+
+```c
+for (size_t outer = 0; outer < outer_iters; outer++) {
+    // 1) 配列A sweep (L1キャッシュを乱す)
+    for (size_t i = 0; i < A_elems; i++) {
+        sum += A[i];  // ← IP: 0x400880, 0x40088c
+    }
+
+    // 2) 配列B chunk アクセス
+    for (size_t j = 0; j < elems_per_iter; j++) {
+        sum += B[base + j * stride_elems];  // ← IP: 0x4008b3
+    }
+}
+```
+
+### Step 1: ディスアセンブリでIPアドレスを確認
+
+```bash
+# カーネル部分のディスアセンブリを確認
+objdump -d benchmark_trace | grep -A100 '400880'
+```
+
+出力例:
+```asm
+400880: vmovsd (%rdx),%xmm1          # A[i] の load (偶数インデックス)
+400884: add    $0x10,%rdx
+400888: vaddsd %xmm0,%xmm1,%xmm0
+40088c: vmovsd -0x8(%rdx),%xmm1      # A[i+1] の load (ループアンロール)
+...
+4008b3: vaddsd (%rcx),%xmm0,%xmm0    # B[idx] の load
+```
+
+**重要: コンパイラ最適化によりループがアンロールされ、Aアクセスは2つのIPで行われる**
+
+### Step 2: trace_inspect でAアクセスを確認
+
+```bash
+# Aアクセス (IP: 0x400880, 0x40088c) をフィルタ
+./trace_inspect --trace ../wp_A64KB_B64MB_chunk32KB_stride16_os2 --max 500000 \
+    | grep -E 'ip=0x400880|ip=0x40088c' | head -20
+```
+
+出力例:
+```
+idx=322141 ip=0x400880 src_mem=[0xfc62a0] dst_mem=[]
+idx=322144 ip=0x40088c src_mem=[0xfc62a8] dst_mem=[]
+idx=322148 ip=0x400880 src_mem=[0xfc62b0] dst_mem=[]
+idx=322151 ip=0x40088c src_mem=[0xfc62b8] dst_mem=[]
+...
+```
+
+### Step 3: Aのアドレス範囲を特定
+
+```bash
+# ユニークなアドレスを抽出
+./trace_inspect --trace ../wp_A64KB_B64MB_chunk32KB_stride16_os2 --max 10000000 \
+    | grep -E 'ip=0x400880|ip=0x40088c' \
+    | awk -F'src_mem=\\[' '{print $2}' | cut -d']' -f1 \
+    | sort -u > /tmp/a_addrs.txt
+
+# 範囲を確認
+echo "最小アドレス: $(head -1 /tmp/a_addrs.txt)"
+echo "最大アドレス: $(tail -1 /tmp/a_addrs.txt)"
+echo "ユニークアドレス数: $(wc -l < /tmp/a_addrs.txt)"
+```
+
+### Step 4: アクセス統計の取得
+
+```bash
+# Aアクセス総数
+A_COUNT=$(./trace_inspect --trace ../wp_A64KB_B64MB_chunk32KB_stride16_os2 --max 100000000 \
+    | grep -cE 'ip=0x400880|ip=0x40088c')
+echo "Aアクセス総数: $A_COUNT"
+
+# Bアクセス総数（比較用）
+B_COUNT=$(./trace_inspect --trace ../wp_A64KB_B64MB_chunk32KB_stride16_os2 --max 100000000 \
+    | grep -c 'ip=0x4008b3')
+echo "Bアクセス総数: $B_COUNT"
+
+# outer iterations の計算
+echo "推定 outer iterations: $((A_COUNT / 8192))"
+```
+
+### 配列AとBのアクセス比較表
+
+| 項目 | 配列A | 配列B |
+|------|-------|-------|
+| **IP** | `0x400880`, `0x40088c` | `0x4008b3` |
+| **アドレス範囲** | `0xfc62a0` ~ `0xfd6298` | `0xc33fd010` ~ ... |
+| **サイズ** | 65,536 bytes (64KB) | 67,108,864 bytes (64MB) × stride |
+| **ストライド** | 8 bytes (連続) | 128 bytes (stride=16 × 8) |
+| **1 outer iter** | 8,192 アクセス | 4,096 アクセス |
+
+### 実例: wp_A64KB_B64MB_chunk32KB_stride16_os2
+
+| 項目 | 配列A | 配列B |
+|------|-------|-------|
+| ベースアドレス (printf出力) | `0xfc62a0` | `0x7f9cc33fd010` |
+| トレース内アドレス | `0xfc62a0` | `0xc33fd010` (下位32bit) |
+| サイズ | 65,536 bytes | 1,073,741,824 bytes |
+| IP | `0x400880`, `0x40088c` | `0x4008b3` |
+| 最初のアクセス idx | 322,141 | 350,820 |
+| アクセス総数 | 1,613,824 | 15,925,440 |
+
+**注意:** 配列Aのアドレスは下位32ビットでも元のアドレスと同じ（スタック/ヒープの低いアドレスに配置されるため）。
+
+### カーネルのアクセスパターン
+
+```
+[A sweep (8192 loads)] → [B chunk (4096 loads)] → [A sweep] → [B chunk] → ...
+     idx=322141~          idx=350820~              次のiter
+```
+
+各 outer iteration で:
+1. 配列A全体を連続アクセス (8,192要素)
+2. 配列Bの1チャンクをストライドアクセス (4,096要素)
+
 ## 今後の予定
 
 - **Phase 3**: `trace_overwrite_range` - トレースの範囲コピー/上書き
