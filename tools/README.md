@@ -17,13 +17,16 @@ make
 
 ```bash
 # 使い方
-./trace_inspect --trace <PATH> [--max N]
+./trace_inspect --trace <PATH> [--max N] [--start IDX]
 
 # 例: 先頭100レコードを表示（デフォルト）
 ./trace_inspect --trace ../wp_A64KB_B64MB_chunk32KB_stride1_os2
 
 # 例: 先頭1000レコードを表示
 ./trace_inspect --trace ../wp_A64KB_B64MB_chunk32KB_stride1_os2 --max 1000
+
+# 例: idx=350820 から10レコードを表示
+./trace_inspect --trace ../wp_A64KB_B64MB_chunk32KB_stride16_os2 --start 350820 --max 10
 ```
 
 #### 出力フォーマット
@@ -92,10 +95,10 @@ struct input_instr {
 #### 出力フォーマット (CSV)
 
 ```csv
-idx,kind,ip,addr
-257902,store,0x40076e,0x147a2a0
-257909,store,0x40076e,0x147a2a8
-315267,load,0x4007e0,0x147a2a0
+idx,kind,ip,addr,offset
+350820,load,0x4008b3,0xc33fd010,0x0
+350825,load,0x4008b3,0xc33fd090,0x80
+350830,load,0x4008b3,0xc33fd110,0x100
 ...
 ```
 
@@ -103,6 +106,7 @@ idx,kind,ip,addr
 - `kind`: `load` (読み込み) または `store` (書き込み)
 - `ip`: 命令アドレス
 - `addr`: アクセス先アドレス
+- `offset`: `addr - b_base` (配列内オフセット、目視検証用)
 
 ## カーネル区間の特定手順
 
@@ -353,6 +357,76 @@ echo "推定 outer iterations: $((A_COUNT / 8192))"
 1. 配列A全体を連続アクセス (8,192要素)
 2. 配列Bの1チャンクをストライドアクセス (4,096要素)
 
-## 今後の予定
+### trace_overwrite_range (Phase 3)
 
-- **Phase 3**: `trace_overwrite_range` - トレースの範囲コピー/上書き
+トレースの指定範囲を別の位置にコピー（上書き）する。トレース全体の長さは変わらない。
+
+```bash
+# 使い方
+./trace_overwrite_range --in <INPUT> --out <OUTPUT> \
+    --src-begin I --src-end J --dst-begin K [--dry-run]
+
+# 例: idx=350820-350920 の100レコードを idx=322141 に上書きコピー
+./trace_overwrite_range \
+    --in ../wp_A64KB_B64MB_chunk32KB_stride16_os2 \
+    --out /tmp/modified.trace \
+    --src-begin 350820 --src-end 350920 --dst-begin 322141
+
+# 例: dry-run で範囲検証のみ（出力ファイルを作成しない）
+./trace_overwrite_range \
+    --in ../wp_A64KB_B64MB_chunk32KB_stride16_os2 \
+    --src-begin 350820 --src-end 350920 --dst-begin 322141 \
+    --dry-run
+```
+
+#### オプション
+
+| オプション | 説明 |
+|-----------|------|
+| `--in PATH` | 入力トレースファイル (必須) |
+| `--out PATH` | 出力トレースファイル (必須、`--dry-run` 時は不要) |
+| `--src-begin I` | コピー元の開始インデックス (含む、必須) |
+| `--src-end J` | コピー元の終了インデックス (含まない、必須) |
+| `--dst-begin K` | コピー先の開始インデックス (必須) |
+| `--dry-run` | 範囲検証のみ、出力ファイルを作成しない |
+
+#### 動作
+
+1. トレースを先頭から順に読み込む
+2. `idx` が `[dst_begin, dst_begin + (src_end - src_begin))` 範囲内の場合:
+   - 元のレコードを破棄し、`[src_begin, src_end)` のレコードを順に出力
+3. それ以外の場合:
+   - 元のレコードをそのまま出力
+4. 出力トレースの総レコード数は入力と同じ（上書きモード）
+
+#### 検証方法
+
+```bash
+# 元トレースの src 範囲を確認
+./trace_inspect --trace ../wp_A64KB_B64MB_chunk32KB_stride16_os2 \
+    --start 350820 --max 5
+
+# overwrite 後の dst 範囲を確認（src と同じ内容になるはず）
+./trace_inspect --trace /tmp/modified.trace \
+    --start 322141 --max 5
+```
+
+#### 典型的なユースケース
+
+**Bチャンクの先読み効果を検証:**
+
+1. `find_b_accesses` で最初のBチャンクの範囲を特定
+2. 配列Aアクセスの途中（または直前）を dst として指定
+3. Bチャンクを dst に上書きコピー
+4. ChampSim で元トレースと改造トレースの IPC を比較
+
+```bash
+# 例: Bの最初のチャンク (idx=350820~354916) を A sweep の途中 (idx=330000) に上書き
+./trace_overwrite_range \
+    --in ../wp_A64KB_B64MB_chunk32KB_stride16_os2 \
+    --out ../wp_modified.trace \
+    --src-begin 350820 --src-end 354916 --dst-begin 330000
+```
+
+**注意:** この上書きは一次近似であり、本来の wrong-path 動作とは異なる。
+キャッシュウォーミング効果の簡易検証が目的。

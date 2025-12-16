@@ -34,11 +34,12 @@ struct input_instr {
 };
 
 static void print_usage(const char *prog) {
-    fprintf(stderr, "Usage: %s --trace PATH [--max N]\n", prog);
+    fprintf(stderr, "Usage: %s --trace PATH [--max N] [--start IDX]\n", prog);
     fprintf(stderr, "\n");
     fprintf(stderr, "Options:\n");
     fprintf(stderr, "  --trace PATH   Path to raw binary trace file (required)\n");
     fprintf(stderr, "  --max N        Maximum number of records to display (default: 100)\n");
+    fprintf(stderr, "  --start IDX    Start index (default: 0)\n");
     fprintf(stderr, "\n");
     fprintf(stderr, "Output format:\n");
     fprintf(stderr, "  idx=<record#> ip=<hex> src_mem=[...] dst_mem=[...]\n");
@@ -47,23 +48,28 @@ static void print_usage(const char *prog) {
 int main(int argc, char *argv[]) {
     const char *trace_path = NULL;
     uint64_t max_records = 100;
+    uint64_t start_idx = 0;
 
     /* Parse command line options */
     static struct option long_options[] = {
         {"trace", required_argument, 0, 't'},
         {"max",   required_argument, 0, 'm'},
+        {"start", required_argument, 0, 's'},
         {"help",  no_argument,       0, 'h'},
         {0, 0, 0, 0}
     };
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "t:m:h", long_options, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "t:m:s:h", long_options, NULL)) != -1) {
         switch (opt) {
             case 't':
                 trace_path = optarg;
                 break;
             case 'm':
                 max_records = strtoull(optarg, NULL, 10);
+                break;
+            case 's':
+                start_idx = strtoull(optarg, NULL, 10);
                 break;
             case 'h':
             default:
@@ -86,17 +92,56 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
+    /* Sanity check: file size must be a multiple of sizeof(input_instr) */
+    fseek(fp, 0, SEEK_END);
+    long filesize = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+
+    if (filesize < 0) {
+        perror("ftell");
+        fclose(fp);
+        return 1;
+    }
+
+    if (filesize % sizeof(struct input_instr) != 0) {
+        fprintf(stderr, "Error: File size (%ld bytes) is not a multiple of sizeof(input_instr) (%zu bytes)\n",
+                filesize, sizeof(struct input_instr));
+        fprintf(stderr, "This may indicate a corrupted trace or mismatched trace format.\n");
+        fclose(fp);
+        return 1;
+    }
+
+    uint64_t total_records = filesize / sizeof(struct input_instr);
+
     /* Print header info */
     printf("# Trace file: %s\n", trace_path);
     printf("# sizeof(input_instr) = %zu bytes\n", sizeof(struct input_instr));
+    printf("# Total records in file: %lu\n", (unsigned long)total_records);
+    printf("# Start index: %lu\n", (unsigned long)start_idx);
     printf("# Displaying up to %lu records\n", (unsigned long)max_records);
     printf("#\n");
 
+    /* Seek to start index if needed */
+    if (start_idx > 0) {
+        if (start_idx >= total_records) {
+            fprintf(stderr, "Error: start_idx (%lu) exceeds total records (%lu)\n",
+                    (unsigned long)start_idx, (unsigned long)total_records);
+            fclose(fp);
+            return 1;
+        }
+        if (fseek(fp, start_idx * sizeof(struct input_instr), SEEK_SET) != 0) {
+            perror("fseek");
+            fclose(fp);
+            return 1;
+        }
+    }
+
     /* Read and print records */
     struct input_instr rec;
-    uint64_t idx = 0;
+    uint64_t idx = start_idx;
+    uint64_t count = 0;
 
-    while (idx < max_records && fread(&rec, sizeof(rec), 1, fp) == 1) {
+    while (count < max_records && fread(&rec, sizeof(rec), 1, fp) == 1) {
         /* Build source memory list (non-zero only) */
         char src_buf[256] = "[";
         int src_first = 1;
@@ -135,16 +180,17 @@ int main(int argc, char *argv[]) {
                dst_buf);
 
         idx++;
+        count++;
     }
 
     /* Summary */
     printf("#\n");
-    printf("# Read %lu records\n", (unsigned long)idx);
+    printf("# Read %lu records\n", (unsigned long)count);
 
     /* Check if we hit EOF or max */
     if (feof(fp)) {
         printf("# Reached end of file\n");
-    } else if (idx >= max_records) {
+    } else if (count >= max_records) {
         printf("# Stopped at --max limit\n");
     }
 
