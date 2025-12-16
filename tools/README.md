@@ -525,3 +525,152 @@ ls -l original.trace inserted.trace
 **上書きモードとの違い:**
 - 上書き: 元のレコードが消える、トレース長は変わらない
 - 挿入: 元のレコードはすべて保持、トレース長が増加
+
+### trace_insert_all_iters (Phase 4)
+
+全 outer iteration に対して、各イテレーションのBチャンクをAの指定位置に一括挿入する。
+
+```bash
+# 使い方
+./trace_insert_all_iters --in <INPUT> --out <OUTPUT> \
+    --first-a-begin IDX --a-len N --b-len N --iterations N \
+    --a-pos RATIO --b-ratio RATIO [--every N] [--dry-run]
+```
+
+#### オプション
+
+| オプション | 説明 |
+|-----------|------|
+| `--in PATH` | 入力トレースファイル (必須) |
+| `--out PATH` | 出力トレースファイル (必須、`--dry-run` 時は不要) |
+| `--first-a-begin IDX` | 最初のAスイープの開始インデックス (必須) |
+| `--a-len N` | 各Aスイープのレコード数 (必須) |
+| `--b-len N` | 各Bチャンクのレコード数 (必須、ループオーバーヘッド含む) |
+| `--iterations N` | outer iteration の総数 (必須) |
+| `--a-pos RATIO` | Aスイープ内の挿入位置 (0.0〜1.0、必須) |
+| `--b-ratio RATIO` | Bチャンクの挿入割合 (0.0〜1.0、必須) |
+| `--every N` | N イテレーションに1回だけ挿入 (デフォルト: 1 = 毎回) |
+| `--dry-run` | 範囲検証のみ、出力ファイルを作成しない |
+
+#### 重要: パラメータ値について
+
+**トレース構造にはループオーバーヘッドが存在する:**
+- B の最後のロードアクセス後、次の A の最初のロードアクセスまでに **11命令** のオーバーヘッドがある
+- `find_b_accesses` で検出される実Bアクセス数と `b_len` は異なる
+
+**wp_A64KB_B64MB_chunk32KB_stride16_os2 の正しいパラメータ:**
+
+| パラメータ | 値 | 説明 |
+|-----------|-----|------|
+| first-a-begin | 322141 | 最初のAスイープ開始位置 |
+| a-len | 28679 | Aスイープのレコード数 |
+| b-len | **20487** | Bチャンク + ループオーバーヘッド (20476 + 11) |
+| iterations | 4096 | outer iteration 数 |
+
+#### 挿入後のトレース構造
+
+```
+元 (iter i):
+[A sweep] → [B chunk (iter i)]
+
+挿入後 (iter i):
+[A前半] → [B chunk (iter i) コピー] → [A後半] → [B chunk (iter i)]
+```
+
+各イテレーションで、そのイテレーション自身のBチャンクがAの指定位置に挿入される。
+同じBアクセスが2回出現する形になる（先読み効果のシミュレーション）。
+
+---
+
+## 実例: 全イテレーションへのB挿入トレース生成
+
+`wp_A64KB_B64MB_chunk32KB_stride16_os2` を元に、全4096イテレーションでAの真ん中にBチャンクを挿入するトレースを生成する手順。
+
+### Step 1: イテレーション数の計算
+
+```bash
+# ファイルサイズからレコード数を計算
+filesize=$(stat -c%s wp_A64KB_B64MB_chunk32KB_stride16_os2)
+total_records=$((filesize / 64))
+echo "総レコード数: $total_records"  # 201707970
+
+# イテレーション数を計算
+first_a_begin=322141
+iter_len=49166  # a_len(28679) + b_len(20487)
+kernel_records=$((total_records - first_a_begin))
+iterations=$((kernel_records / iter_len))
+echo "イテレーション数: $iterations"  # 4096
+```
+
+### Step 2: トレース生成
+
+```bash
+# results ディレクトリを作成
+mkdir -p results
+
+# 全イテレーションでAの真ん中 (a_pos=0.5) にBチャンク全体 (b_ratio=1.0) を挿入
+./tools/trace_insert_all_iters \
+    --in ./wp_A64KB_B64MB_chunk32KB_stride16_os2 \
+    --out ./results/wp_A64KB_B64MB_chunk32KB_stride16_os2_A05_BChunk10.trace \
+    --first-a-begin 322141 \
+    --a-len 28679 --b-len 20487 \
+    --iterations 4096 \
+    --a-pos 0.5 --b-ratio 1.0 \
+    --every 1
+```
+
+### Step 3: 出力確認
+
+```bash
+# ファイルサイズ確認
+# 期待値: 201707970 + 4096 * 20487 = 285622722 レコード = 18,279,854,208 bytes
+ls -lh results/wp_A64KB_B64MB_chunk32KB_stride16_os2_A05_BChunk10.trace
+# 17G (≈ 17.02 GB)
+
+# レコード数確認
+actual_records=$(($(stat -c%s results/wp_A64KB_B64MB_chunk32KB_stride16_os2_A05_BChunk10.trace) / 64))
+echo "実際のレコード数: $actual_records"  # 285622722
+```
+
+### Step 4: 挿入位置の検証
+
+```bash
+# iter 0 の挿入確認 (挿入位置: 322141 + 14339 = 336480)
+./tools/trace_inspect \
+    --trace results/wp_A64KB_B64MB_chunk32KB_stride16_os2_A05_BChunk10.trace \
+    --start 336478 --max 5
+
+# 期待される出力:
+# idx=336478 ip=0x400884 ... ← A アクセス (挿入前)
+# idx=336479 ip=0x400888 ...
+# idx=336480 ip=0x4008b3 ... ← B アクセス (挿入されたBチャンク開始)
+# idx=336481 ip=0x4008b7 ...
+```
+
+### 生成されたトレースのサマリ
+
+| 項目 | 値 |
+|------|-----|
+| 入力ファイル | `wp_A64KB_B64MB_chunk32KB_stride16_os2` |
+| 出力ファイル | `results/wp_A64KB_B64MB_chunk32KB_stride16_os2_A05_BChunk10.trace` |
+| 元サイズ | 12.02 GB (201,707,970 レコード) |
+| 出力サイズ | 17.02 GB (285,622,722 レコード) |
+| イテレーション数 | 4096 |
+| 挿入位置 (a_pos) | 0.5 (Aの真ん中) |
+| 挿入量 (b_ratio) | 1.0 (Bチャンク全体 = 20,487 レコード/iter) |
+| 総挿入レコード数 | 83,914,752 (4096 × 20,487) |
+
+### トレース構造の図解
+
+```
+元トレース (iter i):
+[A sweep (28679)] → [B chunk (20487)]
+
+挿入後 (iter i):
+[A前半 (14339)] → [B chunk コピー (20487)] → [A後半 (14340)] → [B chunk (20487)]
+
+効果:
+- Bチャンクへのアクセスが A sweep の途中で先に発生
+- 同じBデータが2回アクセスされる（先読み + 本来のアクセス）
+- キャッシュウォーミング効果をシミュレート
+```
