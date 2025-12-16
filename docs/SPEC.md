@@ -1,5 +1,16 @@
 # wrongpath-bench trace surgery SPEC
 
+## 改訂履歴
+
+| 日付 | バージョン | 変更内容 |
+|------|-----------|----------|
+| 2025-12-16 | 1.3 | Phase 3.6 (trace_insert_b_at_a) 仕様追加: Aの位置とB挿入量をパラメータで指定 |
+| 2025-12-16 | 1.2 | Phase 3.5 (trace_insert_range) 仕様追加 |
+| 2025-12-15 | 1.1 | Phase 3 (trace_overwrite_range) 仕様追加、配列A特定セクション追加 |
+| 2025-12-14 | 1.0 | 初版: Phase 1-2 仕様 |
+
+---
+
 ## 0. 対象リポジトリとファイル配置
 
 * 対象リポジトリ: [https://github.com/shotsh/wrongpath-bench](https://github.com/shotsh/wrongpath-bench)
@@ -375,6 +386,118 @@ ChampSim に食わせられる改造トレースを作る。
     --src-begin 350820 --src-end 371295 \
     --insert-at 336480
 ```
+
+---
+
+## 3.6 フェーズ3.6: 簡易挿入ツール (trace_insert_b_at_a)
+
+**目的**
+Phase 3.5 の `trace_insert_range` は汎用的だが、パラメータ（src-begin, src-end, insert-at）を
+毎回計算する必要がある。パラメータスイープ実験を効率的に行うため、より直感的なパラメータで
+挿入を指定できるツールを提供する。
+
+**設計思想**
+
+1. **「Aのどこに」**: Aスイープ内の挿入位置を比率（0.0〜1.0）で指定
+2. **「Bのどれくらい」**: Bチャンクの先頭から何レコード（または比率）を挿入するか
+
+これにより、以下のようなパラメータスイープが容易になる:
+- A挿入位置: 0.0, 0.25, 0.5, 0.75, 1.0
+- B挿入量: 0.25, 0.5, 0.75, 1.0
+
+**ツール**
+`tools/trace_insert_b_at_a.c`
+
+### 入力
+
+* `--in PATH_IN`
+  元のバイナリトレース
+* `--out PATH_OUT`
+  挿入後のバイナリトレース
+* `--a-begin IDX`
+  配列Aスイープの開始インデックス（含む）
+* `--a-end IDX`
+  配列Aスイープの終了インデックス（含まない）
+* `--b-begin IDX`
+  配列Bチャンクの開始インデックス（含む）
+* `--b-end IDX`
+  配列Bチャンクの終了インデックス（含まない）
+* `--a-pos RATIO`
+  Aスイープ内の挿入位置（0.0〜1.0）
+  - 0.0: Aの先頭に挿入
+  - 0.5: Aの真ん中に挿入
+  - 1.0: Aの最後（Bの直前）に挿入
+* `--b-ratio RATIO`
+  Bチャンクのうち挿入する割合（0.0〜1.0）
+  - 0.5: Bチャンクの前半を挿入
+  - 1.0: Bチャンク全体を挿入
+* オプション
+  * `--dry-run`
+    出力せず計算結果のみ表示
+
+### 内部計算
+
+```
+insert_at = a_begin + (int)((a_end - a_begin) * a_pos)
+b_insert_len = (int)((b_end - b_begin) * b_ratio)
+src_begin = b_begin
+src_end = b_begin + b_insert_len
+```
+
+### 典型的な使用例
+
+```bash
+# A と B の範囲を find_b_accesses と trace_inspect で特定済みとする
+# A: idx=322141 ~ 350820, B: idx=350820 ~ 371296
+
+# ケース1: Aの真ん中にBチャンク全体を挿入
+./trace_insert_b_at_a \
+    --in ../wp_A64KB_B64MB_chunk32KB_stride16_os2 \
+    --out /tmp/test1.trace \
+    --a-begin 322141 --a-end 350820 \
+    --b-begin 350820 --b-end 371296 \
+    --a-pos 0.5 --b-ratio 1.0
+
+# ケース2: Aの先頭にBチャンクの前半を挿入
+./trace_insert_b_at_a \
+    --in ../wp_A64KB_B64MB_chunk32KB_stride16_os2 \
+    --out /tmp/test2.trace \
+    --a-begin 322141 --a-end 350820 \
+    --b-begin 350820 --b-end 371296 \
+    --a-pos 0.0 --b-ratio 0.5
+
+# パラメータスイープ例
+for a_pos in 0.0 0.25 0.5 0.75 1.0; do
+    for b_ratio in 0.25 0.5 0.75 1.0; do
+        ./trace_insert_b_at_a \
+            --in ../wp_trace \
+            --out /tmp/sweep_a${a_pos}_b${b_ratio}.trace \
+            --a-begin 322141 --a-end 350820 \
+            --b-begin 350820 --b-end 371296 \
+            --a-pos $a_pos --b-ratio $b_ratio
+    done
+done
+```
+
+### 出力情報
+
+ツールは実行時に以下の情報を標準エラーに出力する:
+
+```
+# Input: ../wp_A64KB_B64MB_chunk32KB_stride16_os2
+# A range: [322141, 350820) (28679 records)
+# B range: [350820, 371296) (20476 records)
+# Parameters: a_pos=0.5, b_ratio=1.0
+# Calculated:
+#   insert_at = 336480 (A midpoint)
+#   B insert: [350820, 371296) (20476 records)
+# Output records: 201707970 + 20476 = 201728446
+```
+
+### 制約事項
+
+* 単一のAスイープ、単一のBチャンクに対する単一挿入のみ対応
+* 複数 outer iteration への一括挿入は将来の Phase 4 で対応予定
 
 ---
 
