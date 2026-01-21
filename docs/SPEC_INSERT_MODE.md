@@ -171,9 +171,9 @@ ls -l /tmp/inserted.trace
    - シンプルな1パス実装
    - 基本的な効果検証に十分
 
-2. **Phase 4: trace_edit（複数挿入）** ← 必要になったら
-   - 編集計画ファイル方式
-   - 全outer iterationへの挿入などに対応
+2. **Phase 4: trace_insert_all_iters（全イテレーション挿入）**
+   - 現行実装は `tools/trace_insert_all_iters.c`
+   - 複数挿入の編集計画ファイル方式（trace_edit）は未実装
 
 ## 9. 実装例（擬似コード）
 

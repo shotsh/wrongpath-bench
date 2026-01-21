@@ -16,7 +16,7 @@
 ## 0. 対象リポジトリとファイル配置
 
 * 対象リポジトリ: [https://github.com/shotsh/wrongpath-bench](https://github.com/shotsh/wrongpath-bench)
-* この SPEC は `wrongpath-bench/docs/wpsurgery_spec.md` として置く
+* この SPEC は `wrongpath-bench/docs/SPEC.md` として置く
 * ツール類は `wrongpath-bench/tools/` 以下に置く
 
 ---
@@ -52,8 +52,9 @@
 * ChampSim リポジトリの `tracer/pin` 以下にある標準トレーサで生成したもの
 * フォーマットは `inc/trace_instruction.h` の `struct input_instr` と同じバイナリレイアウト
 * 1 レコードは固定長（`sizeof(input_instr)` バイト）
-* **重要: ツール側が想定する `input_instr` の定義は、トレース生成に使った ChampSim と同一コミットの `inc/trace_instruction.h` を参照する**
+* **重要: ツール側が想定する `input_instr` の定義は、トレース生成に使った ChampSim と同一コミットの `inc/trace_instruction.h` を参照すること**
 
+  * 現状のツール実装は `input_instr` をローカルに複製定義しているため、ヘッダ更新時は要注意
   * コンパイラやABI差で `sizeof(input_instr)` が変わり得るため
 
 ### 2.2 圧縮について
@@ -96,7 +97,7 @@
 
   * `--max N`
     表示するレコード数（デフォルト 100）
-  * （将来拡張）`--begin IDX --count N`
+  * （将来拡張）`--start IDX` と `--max N`
     特定範囲だけ見るため
 
 ### 出力（テキスト）
@@ -430,7 +431,7 @@ Phase 3.5 の `trace_insert_range` は汎用的だが、パラメータ（src-be
   - 0.5: Aの真ん中に挿入
   - 1.0: Aの最後（Bの直前）に挿入
 * `--b-ratio RATIO`
-  Bチャンクのうち挿入する割合（0.0〜1.0）
+  Bチャンクのうち挿入する割合（0.0〜1.0]
   - 0.5: Bチャンクの前半を挿入
   - 1.0: Bチャンク全体を挿入
 * オプション
@@ -536,7 +537,7 @@ Phase 3.6 の単一挿入を、全 outer iteration に対して一括で適用�
 * `--a-pos RATIO`
   各 A スイープ内の挿入位置（0.0〜1.0）
 * `--b-ratio RATIO`
-  各 B チャンクの挿入割合（0.0〜1.0）
+  各 B チャンクの挿入割合（0.0〜1.0]
 * オプション
   * `--every N`
     N イテレーションに1回だけ挿入（デフォルト: 1 = 毎回挿入）
@@ -776,4 +777,3 @@ echo "Expected: $expected_size, Actual: $actual_size"
    * の目安を作り、wrong-path 機構の設計に繋げる
 
 当面は、フェーズ1〜4を **Cで自力で触れるレベルに落とすこと**を最優先とする。
-

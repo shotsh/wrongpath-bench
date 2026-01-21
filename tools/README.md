@@ -526,7 +526,7 @@ ls -l original.trace inserted.trace
 - 上書き: 元のレコードが消える、トレース長は変わらない
 - 挿入: 元のレコードはすべて保持、トレース長が増加
 
-### trace_insert_all_iters (Phase 4)
+## trace_insert_all_iters (Phase 4)
 
 全 outer iteration に対して、各イテレーションのBチャンクをAの指定位置に一括挿入する。
 

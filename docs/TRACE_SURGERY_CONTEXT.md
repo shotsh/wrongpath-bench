@@ -1,7 +1,7 @@
 # wrongpath-bench Trace Surgery Context Pack (1-file)
 
 この1ファイルを Claude Code に渡せば、背景と当面の仕様が分かるようにする。
-（このファイルを `docs/WPTRACE_CONTEXT_PACK.md` として置く想定）
+（このファイルを `docs/TRACE_SURGERY_CONTEXT.md` として置く想定）
 
 ---
 
@@ -9,7 +9,7 @@
 
 - 対象リポジトリ: https://github.com/shotsh/wrongpath-bench
 - 置き場所案
-  - このファイル: `docs/WPTRACE_CONTEXT_PACK.md`
+  - このファイル: `docs/TRACE_SURGERY_CONTEXT.md`
   - ツール: `tools/`
   - 将来ログ/実験スクリプト: `scripts/`
 
