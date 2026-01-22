@@ -450,7 +450,7 @@ src_end = b_begin + b_insert_len
 ```
 
 * `insert_at` は切り捨て計算。`a_pos=1.0` のとき `insert_at=a_end` として「B直前に挿入」を許容
-* `b_insert_len` も切り捨て計算。0 になった場合は 1 レコード挿入に切り上げる（実装仕様）
+* `b_insert_len` は「元のBチャンク長 × b_ratio」を切り捨てた長さ。Bチャンク先頭からその長さだけを挿入する（例: `b_ratio=0.5` なら B 先頭から半分を挿入）。0 になった場合は 1 レコード挿入に切り上げる（実装仕様）
 
 ### 典型的な使用例
 
@@ -573,7 +573,7 @@ src_begin[i] = b_begin[i]
 src_end[i] = b_begin[i] + b_insert_len
 ```
 
-* `b_insert_len = floor(b_len * b_ratio)`。0 になった場合は 1 レコードに切り上げる（実装仕様）
+* `b_insert_len = floor(b_len * b_ratio)`。Bチャンク先頭からその長さだけ挿入する（例: `b_ratio=0.5` なら先頭から半分）。0 になった場合は 1 レコードに切り上げる（実装仕様）
 * `iterations` は `floor((total_records - first_a_begin) / (a_len + b_len))` で推定し、境界検算として B0末尾とA1先頭の関係を確認する
 
 ### 重要: トレース構造とパラメータの正確な値
