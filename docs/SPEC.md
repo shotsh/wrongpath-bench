@@ -51,7 +51,7 @@
 
 * ChampSim リポジトリの `tracer/pin` 以下にある標準トレーサで生成したもの
 * フォーマットは `inc/trace_instruction.h` の `struct input_instr` と同じバイナリレイアウト
-* 1 レコードは固定長（`sizeof(input_instr)` バイト）
+* 1 レコードは固定長（`record_bytes = sizeof(input_instr)` バイト。現状は 64 だが、ヘッダ変更で変わりうる）
 * **重要: ツール側が想定する `input_instr` の定義は、トレース生成に使った ChampSim と同一コミットの `inc/trace_instruction.h` を参照すること**
 
   * 現状のツール実装は `input_instr` をローカルに複製定義しているため、ヘッダ更新時は要注意
@@ -165,13 +165,14 @@ idx=12346 ip=0x400ac0 src_mem=[0x7f2000001008] dst_mem=[]
 * 1 レコード中の `source_memory[]` または `destination_memory[]` のアドレス `addr` について
 
   * `b_base <= addr < b_base + b_size` なら「B へのアクセス」
+  * tracer がアドレスを 32bit に切って記録している場合は、双方とも下位32bitにマスクして比較する
 
 ### 出力（CSV推奨）
 
 最低限:
 
 * レコード番号 `idx`
-* 種別 `kind`（load/store）
+* 種別 `kind`（load/store。1レコードで src/dst の両方が範囲内になる場合、load と store の2行が出る）
 * `ip`
 * `addr`
 * **`offset = addr - b_base`**（目視検証用）
@@ -271,6 +272,7 @@ wc -l /tmp/a_addrs.txt    # ユニークアドレス数（= A_elems であるべ
 * **A のアドレスは下位32ビットでも元のアドレスと一致することが多い**
   （ヒープの低いアドレスに配置されるため）
 * **B のアドレスは mmap で高位に配置されるため、下位32ビットのみが記録される**
+  * 判定は「記録幅に合わせる」。tracer が 32bit に切っているなら `addr & 0xffffffff` と `b_base & 0xffffffff` で比較する
 
 ---
 
@@ -447,6 +449,9 @@ src_begin = b_begin
 src_end = b_begin + b_insert_len
 ```
 
+* `insert_at` は切り捨て計算。`a_pos=1.0` のとき `insert_at=a_end` として「B直前に挿入」を許容
+* `b_insert_len` も切り捨て計算。0 になった場合は 1 レコード挿入に切り上げる（実装仕様）
+
 ### 典型的な使用例
 
 ```bash
@@ -568,6 +573,9 @@ src_begin[i] = b_begin[i]
 src_end[i] = b_begin[i] + b_insert_len
 ```
 
+* `b_insert_len = floor(b_len * b_ratio)`。0 になった場合は 1 レコードに切り上げる（実装仕様）
+* `iterations` は `floor((total_records - first_a_begin) / (a_len + b_len))` で推定し、境界検算として B0末尾とA1先頭の関係を確認する
+
 ### 重要: トレース構造とパラメータの正確な値
 
 実装検証により、トレース構造には**ループオーバーヘッド**が存在することが判明した。
@@ -615,7 +623,7 @@ src_end[i] = b_begin[i] + b_insert_len
 
 **計算量**: O(入力レコード数 + 挿入総レコード数) ≈ O(N)
 
-**メモリ使用量**: 1イテレーション分の B 挿入レコード (b_len × b_ratio × 64 bytes)
+**メモリ使用量**: 1イテレーション分の B 挿入レコード (b_len × b_ratio × record_bytes)。record_bytes は `sizeof(input_instr)`（trace_inspect のヘッダに出る値）を使う
 
 ### 典型的な使用例
 
@@ -706,13 +714,21 @@ done
 [A_N-1前半] → [B_N-1コピー] → [A_N-1後半] → [B_N-1]
 ```
 
+### 評価時の注意（挿入モード）
+
+挿入モードでは元の命令列を保持したままレコード数が増える。IPC/MPKI 比較をする場合は
+* 「同じレコード数/ROIを比較するのか」
+* 「挿入による追加命令も含めて評価するのか」
+を実験計画で固定する。
+
 ### 検証方法
 
 ```bash
 # 1. ファイルサイズ確認
 # b_ratio=0.9995 の場合、挿入されるのは 20476 records/iter
 expected_size=$((201707970 + 4096 * 20476))
-actual_size=$(($(stat -c%s output.trace) / 64))
+record_bytes=64   # trace_inspect のヘッダに出る sizeof(input_instr)
+actual_size=$(($(stat -c%s output.trace) / record_bytes))
 echo "Expected: $expected_size, Actual: $actual_size"
 
 # 2. 最初のイテレーションの挿入を確認
